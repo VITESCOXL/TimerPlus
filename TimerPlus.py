@@ -69,7 +69,7 @@ class TimerPlus(PT):
     self._session_refine_time = 0.0  # refine time accumulated since last save
     self._orig_refine_run = None
     self.sNumPath = None
-.sNum = None
+    self.sNum = None
     
     OV.registerFunction(self.print_formula,True,self.p_name)
     OV.registerFunction(self.get_idle_time,True,self.p_name)
