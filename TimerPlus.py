@@ -82,6 +82,7 @@ class TimerPlus(PT):
     OV.registerFunction(self.refresh_display,True,self.p_name)
     OV.registerFunction(self.get_session_time,True,self.p_name)
     OV.registerFunction(self.get_refine_time,True,self.p_name)
+    OV.registerFunction(self.get_work_time_for_dataset,True,self.p_name)
     if not from_outside:
       self.setup_gui()
     # END Generated =======================================
@@ -97,6 +98,36 @@ class TimerPlus(PT):
 
     # Auto-start: initialise timing for any structure already loaded at startup
     self.check_and_switch_molecule()
+
+    # Patch multiple datasets so work-time badges appear in multi-CIF dataset buttons
+    self._patch_multiple_dataset()
+
+  def _patch_multiple_dataset(self):
+    try:
+      import gui.home as home_module
+      mds = home_module.mds
+      timer_instance = self
+      if not getattr(mds, '_timerplus_patched', False):
+        orig_list_datasets = mds.list_datasets
+
+        def patched_list_datasets(sort_key):
+          rv = orig_list_datasets(sort_key)
+          result = []
+          for entry in rv:
+            index, name, display, sk, do_show = entry
+            if do_show and name:
+              work_time = timer_instance.get_work_time_for_dataset(name)
+              if work_time:
+                display = '%s [%s]' % (display, work_time)
+            result.append((index, name, display, sk, do_show))
+          return result
+
+        mds.list_datasets = patched_list_datasets
+        mds._timerplus_patched = True
+        if debug:
+          print('TimerPlus: patched mds.list_datasets')
+    except Exception as e:
+      print('TimerPlus: could not patch mds: %s' % str(e))
 
   def load_timing_data(self):
     """Load timing history from JSON file"""
@@ -117,13 +148,19 @@ class TimerPlus(PT):
     except Exception as e:
       print("Error saving timing data: %s" % str(e))
 
-    """Save current molecule to local JSON file"""
-    try:
-      fn = os.path.join(OV.StrDir(), f"{OV.ModelSrc()}_timer.json")
-      with open(fn, 'w') as f:
-        json.dump(self.molecule_timings[self.current_molecule], f, indent=2)
-    except Exception as e:
-      print("Error saving local timing data: %s" % str(e))
+    """Save every tracked molecule to its own local _timer.json in its sNumPath directory."""
+    for mol_name, mol_data in self.molecule_timings.items():
+      try:
+        strdir = mol_data.get('sNumPath') or OV.StrDir()
+        if not strdir:
+          strdir = instance_path
+        fn = os.path.join(strdir, '%s_timer.json' % mol_name)
+        with open(fn, 'w') as f:
+          json.dump(mol_data, f, indent=2)
+        if debug:
+          print("TimerPlus: saved %s_timer.json to %s" % (mol_name, strdir))
+      except Exception as e:
+        print("Error saving local timing data for %s: %s" % (mol_name, str(e)))
 
 
 
@@ -525,6 +562,22 @@ class TimerPlus(PT):
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
     return "%02d:%02d:%02d" % (hours, minutes, secs)
+
+  def get_work_time_for_dataset(self, dataset_name):
+    """Return formatted HH:MM:SS work time for a named dataset from its _timer.json, or '' if unavailable."""
+    try:
+      strdir = olx.FilePath()
+      if not strdir:
+        return ''
+      fn = os.path.join(strdir, '%s_timer.json' % dataset_name)
+      if not os.path.exists(fn):
+        return ''
+      with open(fn, 'r') as f:
+        data = json.load(f)
+      secs = float(data.get('total_work_time', 0.0))
+      return self._format_time(secs)
+    except Exception:
+      return ''
   
 
   def get_or_create_structure(directory, name):
