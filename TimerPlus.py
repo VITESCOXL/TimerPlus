@@ -11,6 +11,7 @@ import olex_gui
 import time
 import json
 import uuid
+import re
 try:
   from RunPrg import RunRefinementPrg
 except Exception:
@@ -69,6 +70,11 @@ class TimerPlus(PT):
     self.sNum = None
     self._refresh_interval = None
     self._refresh_active = False
+    self._idle_seconds = 0.0
+    self._idle_last_update = time.time()
+    self._last_activity_time = time.time()
+    self._idle_grace = float(OV.GetParam('TimerPlus.idle_grace', 2.0) or 2.0)
+    self._last_mouse_pos = None
     
     OV.registerFunction(self.print_formula,True,self.p_name)
     OV.registerFunction(self.get_idle_time,True,self.p_name)
@@ -101,7 +107,7 @@ class TimerPlus(PT):
     self.check_and_switch_molecule()
 
     # Initialise display variables so the HTML panel never shows missing-var errors
-    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_RUN'):
+    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN'):
       OV.SetVar(_var, '')
     self.update_timer_vars()
 
@@ -188,6 +194,7 @@ class TimerPlus(PT):
   def _on_file_changed(self, filetype):
     """Called automatically by Olex2 whenever a structure is opened."""
     try:
+      self._mark_activity()
       self.check_and_switch_molecule()
       if self.current_molecule and self.current_molecule != "No structure loaded":
         print("TimerPlus: auto-started timing for '%s'" % self.current_molecule)
@@ -209,12 +216,14 @@ class TimerPlus(PT):
       self._orig_refine_run = _orig
 
       def _timed_run(rp_self):
+        timer._mark_activity()
         start = time.time()
         try:
           return _orig(rp_self)
         finally:
           elapsed = max(0.0, time.time() - start)
           timer._session_refine_time += elapsed
+          timer._mark_activity()
 
       RunRefinementPrg.run = _timed_run
     except Exception as e:
@@ -248,7 +257,14 @@ class TimerPlus(PT):
     if not self._refresh_active:
       return
     try:
-      self.refresh_display()
+      # Idle is now plugin-side, so scheduled control updates are safe again.
+      self._sample_pointer_activity()
+      self.check_and_switch_molecule()
+      self.update_timer_vars(push_controls=True)
+      try:
+        olx.html.Update()
+      except Exception:
+        pass
     except Exception:
       pass
     if self._refresh_active and self._refresh_interval and self._refresh_interval > 0:
@@ -256,6 +272,51 @@ class TimerPlus(PT):
 
   def _stop_refresh_timer(self):
     self._refresh_active = False
+
+  def _reset_idle_tracking(self, reset_gui=False):
+    """Reset plugin-side idle accumulation and optionally reset Olex idle counter."""
+    now = time.time()
+    self._idle_seconds = 0.0
+    self._idle_last_update = now
+    self._last_activity_time = now
+    self._last_mouse_pos = None
+    if reset_gui:
+      try:
+        olex_gui.ResetIdleTime()
+      except Exception:
+        pass
+
+  def _mark_activity(self):
+    self._last_activity_time = time.time()
+
+  def _sample_pointer_activity(self):
+    """Treat mouse motion as user activity for plugin-side idle tracking."""
+    try:
+      x = int(olx.GetMouseX())
+      y = int(olx.GetMouseY())
+      pos = (x, y)
+      if self._last_mouse_pos is None:
+        self._last_mouse_pos = pos
+        return
+      if pos != self._last_mouse_pos:
+        self._mark_activity()
+      self._last_mouse_pos = pos
+    except Exception:
+      pass
+
+  def _update_idle_clock(self):
+    """Advance plugin-side idle counter using recent activity timestamps."""
+    now = time.time()
+    dt = max(0.0, now - self._idle_last_update)
+    self._idle_last_update = now
+    if (now - self._last_activity_time) >= self._idle_grace:
+      self._idle_seconds += dt
+    return self._idle_seconds
+
+  def _get_idle_seconds(self):
+    """Return idle seconds derived from plugin-tracked activity."""
+    self._sample_pointer_activity()
+    return self._update_idle_clock()
 
   
 
@@ -277,7 +338,7 @@ class TimerPlus(PT):
 
   def get_refine_time(self):
     """Get accumulated refinement time for current molecule."""
-    self.check_and_switch_molecule()
+    self.check_and_switch_molecule(do_autosave=False)
     try:
       mol = self.current_molecule
       if not mol or mol == "No structure loaded":
@@ -289,14 +350,14 @@ class TimerPlus(PT):
 
   # ------------------------------------------------------------------
 
-  def check_and_switch_molecule(self):
+  def check_and_switch_molecule(self, do_autosave=True):
     """Check if molecule has changed and switch timing context"""
     mol_name = self._get_molecule_name_internal()
     
     # Periodic auto-save (every 10 seconds)
-    if time.time() - self._last_auto_save > self._save_interval:
+    if do_autosave and time.time() - self._last_auto_save > self._save_interval:
       if self.current_molecule and self.current_molecule != "No structure loaded":
-        self.save_current_molecule_timing()
+        self.save_current_molecule_timing(reset_idle=True)
       self._last_auto_save = time.time()
     
     if mol_name != self.current_molecule:
@@ -321,7 +382,7 @@ class TimerPlus(PT):
           self.save_timing_data()
         self.current_start_time = time.time()
         self._session_refine_time = 0.0
-        olex_gui.ResetIdleTime()
+        self._reset_idle_tracking(reset_gui=True)
     else:
       # Same molecule, ensure it exists in timings
       if mol_name != "No structure loaded" and mol_name not in self.molecule_timings:
@@ -335,16 +396,16 @@ class TimerPlus(PT):
         self.save_timing_data()
         if self.current_start_time is None:
           self.current_start_time = time.time()
-          olex_gui.ResetIdleTime()
+          self._reset_idle_tracking(reset_gui=True)
   
-  def save_current_molecule_timing(self):
+  def save_current_molecule_timing(self, reset_idle=True):
     """Save timing for current molecule"""
     if not self.current_molecule or self.current_molecule == "No structure loaded":
       return
     
     if self.current_start_time is not None:
       elapsed = time.time() - self.current_start_time
-      idle = olex_gui.GetIdleTime()
+      idle = self._get_idle_seconds()
       work = max(0, elapsed - idle - self._session_refine_time)
       
       if self.current_molecule in self.molecule_timings:
@@ -361,7 +422,8 @@ class TimerPlus(PT):
       
       # Reset timers to avoid double-counting
       self.current_start_time = time.time()
-      olex_gui.ResetIdleTime()
+      if reset_idle:
+        self._reset_idle_tracking(reset_gui=True)
       self._session_refine_time = 0.0
   
   def _get_molecule_name_internal(self):
@@ -379,7 +441,7 @@ class TimerPlus(PT):
       return "No structure loaded"
 
   def print_formula(self):
-    self.check_and_switch_molecule()
+    self.check_and_switch_molecule(do_autosave=False)
     formula = {}
     for element in str(olx.xf.GetFormula('list')).split(','):
       element_type, n = element.split(':')
@@ -400,11 +462,11 @@ class TimerPlus(PT):
 
   def get_idle_time(self):
     """Get idle time for current molecule"""
-    self.check_and_switch_molecule()
+    self.check_and_switch_molecule(do_autosave=False)
     try:
       if self.current_molecule == "No structure loaded" or self.current_molecule is None:
         return 0.0
-      current_idle = olex_gui.GetIdleTime()
+      current_idle = self._get_idle_seconds()
       total_idle = self.molecule_timings.get(self.current_molecule, {}).get('total_idle_time', 0.0)
       return round(float(total_idle + current_idle), 1)
     except Exception:
@@ -412,16 +474,16 @@ class TimerPlus(PT):
   
   def get_work_time(self):
     """Get work time for current molecule"""
-    self.check_and_switch_molecule()
+    self.check_and_switch_molecule(do_autosave=False)
     try:
       if self.current_molecule == "No structure loaded" or self.current_molecule is None:
         return 0.0
       if self.current_start_time is None:
         self.current_start_time = time.time()
-        olex_gui.ResetIdleTime()
+        self._reset_idle_tracking(reset_gui=True)
         return 0.0
       elapsed = time.time() - self.current_start_time
-      idle = olex_gui.GetIdleTime()
+      idle = self._get_idle_seconds()
       session_refine = self._session_refine_time
       work = max(0, elapsed - idle - session_refine)
       total_work = self.molecule_timings.get(self.current_molecule, {}).get('total_work_time', 0.0)
@@ -432,14 +494,14 @@ class TimerPlus(PT):
   
   def get_running_time(self):
     """Get running time for current molecule"""
-    self.check_and_switch_molecule()
+    self.check_and_switch_molecule(do_autosave=False)
     try:
       if self.current_molecule == "No structure loaded" or self.current_molecule is None:
         return 0.0
       if self.current_start_time is None:
         # Timer not started yet, initialize it
         self.current_start_time = time.time()
-        olex_gui.ResetIdleTime()
+        self._reset_idle_tracking(reset_gui=True)
         return 0.0
       elapsed = time.time() - self.current_start_time
       total_run = self.molecule_timings.get(self.current_molecule, {}).get('total_run_time', 0.0)
@@ -449,45 +511,59 @@ class TimerPlus(PT):
   
   def get_molecule_name(self):
     """Get the current structure/molecule name"""
-    self.check_and_switch_molecule()
+    self.check_and_switch_molecule(do_autosave=False)
     return self.current_molecule if self.current_molecule else "No structure loaded"
   
   def update_timing(self):
     """Force update and save current molecule timing"""
+    self._mark_activity()
     self.check_and_switch_molecule()
     self.save_current_molecule_timing()
     return "Timing saved and updated"
   
-  def update_timer_vars(self):
-    self.check_and_switch_molecule()
+  def update_timer_vars(self, push_controls=True):
+    self.check_and_switch_molecule(do_autosave=False)
     mol = self.current_molecule
     if not mol or mol == "No structure loaded":
       return
     OV.SetVar('TIMER_MOL', mol)
-    try:
-      OV.SetControlValue('TIMER_MOL', mol)
-    except Exception:
-      pass
-    l = ["WORK", "REFINE", "RUN"]
-    for item in l:
-      _ = self.molecule_timings[mol].get(f'total_{item.lower()}_time', 0.0)
-      t = f"{int(_//3600):02d}:{int((_% 3600)//60):02d}:{int(_%60):02d}"
-      ctrl = f'TIMER_{item}'
-      OV.SetVar(ctrl, t)
+    if push_controls:
       try:
-        OV.SetControlValue(ctrl, t)
+        OV.SetControlValue('TIMER_MOL', mol)
       except Exception:
         pass
+    elapsed = 0.0
+    if self.current_start_time is not None:
+      elapsed = max(0.0, time.time() - self.current_start_time)
+    current_idle = self._get_idle_seconds()
+
+    totals = {
+      'WORK': self.molecule_timings[mol].get('total_work_time', 0.0) + max(0.0, elapsed - current_idle - self._session_refine_time),
+      'REFINE': self.molecule_timings[mol].get('total_refine_time', 0.0) + self._session_refine_time,
+      'IDLE': self.molecule_timings[mol].get('total_idle_time', 0.0) + current_idle,
+      'RUN': self.molecule_timings[mol].get('total_run_time', 0.0) + elapsed,
+    }
+
+    for item, seconds in totals.items():
+      t = self._format_time(seconds)
+      ctrl = f'TIMER_{item}'
+      OV.SetVar(ctrl, t)
+      if push_controls:
+        try:
+          OV.SetControlValue(ctrl, t)
+        except Exception:
+          pass
 
   def refresh_display(self):
     """Refresh the display to show current timing"""
-    self.check_and_switch_molecule()
-    self.update_timer_vars()
+    self.check_and_switch_molecule(do_autosave=False)
+    self.update_timer_vars(push_controls=True)
     olx.html.Update()
     return "Display refreshed"
   
   def reset_current_timing(self):
     """Reset timing for current molecule"""
+    self._mark_activity()
     mol_name = self._get_molecule_name_internal()
     if mol_name and mol_name != "No structure loaded":
       if mol_name in self.molecule_timings:
@@ -495,7 +571,7 @@ class TimerPlus(PT):
         self.save_timing_data()
       self.current_start_time = time.time()
       self.current_idle_start = 0
-      olex_gui.ResetIdleTime()
+      self._reset_idle_tracking(reset_gui=True)
       try:
         olx.html.Update()
       except:
@@ -505,7 +581,7 @@ class TimerPlus(PT):
   
   def get_timing_history(self):
     """Get formatted HTML table of timing history for all molecules"""
-    self.check_and_switch_molecule()
+    self.check_and_switch_molecule(do_autosave=False)
     
     # Get current session times
     current_work = 0.0
@@ -514,8 +590,8 @@ class TimerPlus(PT):
     
     if self.current_molecule and self.current_molecule != "No structure loaded" and self.current_start_time is not None:
       elapsed = time.time() - self.current_start_time
-      idle = olex_gui.GetIdleTime()
-      current_work = max(0, elapsed - idle)
+      idle = self._get_idle_seconds()
+      current_work = max(0, elapsed - idle - self._session_refine_time)
       current_idle = idle
       current_total = elapsed
     
