@@ -2,16 +2,13 @@ from olexFunctions import OlexFunctions
 OV = OlexFunctions()
 
 import os
-import htmlTools
 import olex
 import olx
-import gui
 import olex_gui
 
 import time
 import json
 import uuid
-import re
 try:
   from RunPrg import RunRefinementPrg
 except Exception:
@@ -294,6 +291,17 @@ class TimerPlus(PT):
     try:
       x = int(olx.GetMouseX())
       y = int(olx.GetMouseY())
+
+      # Only count activity while pointer is inside the Olex2 GL viewport.
+      ws = [int(v) for v in olx.GetWindowSize('gl').split(',')]
+      if len(ws) >= 4:
+        x0, y0, w, h = ws[0], ws[1], ws[2], ws[3]
+        inside_local = (0 <= x < w) and (0 <= y < h)
+        inside_absolute = (x0 <= x < (x0 + w)) and (y0 <= y < (y0 + h))
+        if not (inside_local or inside_absolute):
+          self._last_mouse_pos = None
+          return
+
       pos = (x, y)
       if self._last_mouse_pos is None:
         self._last_mouse_pos = pos
