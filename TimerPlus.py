@@ -10,9 +10,10 @@ import time
 import json
 import uuid
 try:
-  from RunPrg import RunRefinementPrg
+  from RunPrg import RunRefinementPrg, LM
 except Exception:
   RunRefinementPrg = None
+  LM = None
 
 
 instance_path = OV.DataDir()
@@ -63,6 +64,8 @@ class TimerPlus(PT):
     self._save_interval = 10  # Auto-save every 10 seconds
     self._session_refine_time = 0.0  # refine time accumulated since last save
     self._orig_refine_run = None
+    self._registered_refine_listeners = False
+    self._in_refine = False
     self.sNumPath = None
     self.sNum = None
     self._refresh_interval = None
@@ -205,35 +208,141 @@ class TimerPlus(PT):
   def _register_refine_timing(self):
     """Wrap RunRefinementPrg.run so refinement time is captured synchronously.
     Refinement blocks the main thread, so polling cannot work — only a wrap does."""
-    if RunRefinementPrg is None:
+    # Prefer using RunPrg.ListenerManager (LM) start/end callbacks if available
+    if RunRefinementPrg is None or LM is None:
       return
     try:
-      timer = self
-      _orig = RunRefinementPrg.run
-      self._orig_refine_run = _orig
-
-      def _timed_run(rp_self):
-        timer._mark_activity()
-        start = time.time()
-        try:
-          return _orig(rp_self)
-        finally:
-          elapsed = max(0.0, time.time() - start)
-          timer._session_refine_time += elapsed
-          timer._mark_activity()
-
-      RunRefinementPrg.run = _timed_run
+      LM.register_listener(self._on_refine_start, "onStart")
+      LM.register_listener(self._on_refine_end, "onEnd")
+      self._registered_refine_listeners = True
     except Exception as e:
-      print("TimerPlus: could not wrap RunRefinementPrg.run: %s" % str(e))
+      print("TimerPlus: could not register refine listeners: %s" % str(e))
 
-  def _unregister_refine_timing(self):
-    """Restore original RunRefinementPrg.run."""
-    if RunRefinementPrg is not None and self._orig_refine_run is not None:
+    # Some refinement invocation paths call LM.startRun, others do not.
+    # Provide a minimal, safe wrapper on RunRefinementPrg.run as a fallback
+    # to ensure we always capture a start timestamp. The wrapper does NOT
+    # add elapsed time itself; LM.endRun/_on_refine_end will handle adding
+    # elapsed so we avoid double-counting.
+    try:
+      if RunRefinementPrg is not None:
+        # avoid double-wrapping
+        orig = getattr(RunRefinementPrg, 'run', None)
+        if orig is not None and not getattr(orig, '_timerplus_wrapped', False):
+          def _start_only_run(rp_self):
+            # If LM already marked start (caller attribute), don't double-mark.
+            marked_by_lm = getattr(rp_self, '_timerplus_started_by_lm', False)
+            start = None
+            try:
+              self._mark_activity()
+              if not marked_by_lm:
+                # record start time locally and mark instance so we know to add elapsed after
+                start = time.time()
+                rp_self._timerplus_started_by_timerplus = True
+                self._refine_start_time = start
+                self._in_refine = True
+                # prevent idle accumulation while refinement runs
+                self._last_activity_time = start
+              else:
+                # LM will handle timing; ensure we have a start time from LM handler
+                start = getattr(self, '_refine_start_time', None)
+            except Exception:
+              pass
+            # call original implementation
+            try:
+              return orig(rp_self)
+            finally:
+              # If we started timing here (LM did not), compute elapsed and add it
+              try:
+                if getattr(rp_self, '_timerplus_started_by_timerplus', False):
+                  end = time.time()
+                  st = start or getattr(self, '_refine_start_time', None)
+                  if st:
+                    elapsed = max(0.0, end - st)
+                    self._session_refine_time += elapsed
+                  # cleanup marker and refine state
+                  try:
+                    del rp_self._timerplus_started_by_timerplus
+                  except Exception:
+                    pass
+                  try:
+                    self._in_refine = False
+                    self._last_activity_time = time.time()
+                  except Exception:
+                    pass
+              except Exception:
+                pass
+
+          # tag and store original for safe restore
+          _start_only_run._timerplus_wrapped = True
+          self._orig_refine_run = orig
+          RunRefinementPrg.run = _start_only_run
+    except Exception as e:
+      print("TimerPlus: could not apply start-only wrapper: %s" % str(e))
+
+  def _on_refine_start(self, caller):
+    """Listener called by RunPrg when a run/refine starts."""
+    try:
+      self._mark_activity()
+      # mark both plugin and caller so the wrapper knows LM handled start
+      ts = time.time()
+      self._refine_start_time = ts
+      self._in_refine = True
+      # prevent idle accumulation during refine
+      self._last_activity_time = ts
       try:
-        RunRefinementPrg.run = self._orig_refine_run
-        self._orig_refine_run = None
+        caller._timerplus_started_by_lm = True
       except Exception:
         pass
+    except Exception:
+      pass
+
+  def _on_refine_end(self, caller):
+    """Listener called by RunPrg when a run/refine ends."""
+    try:
+      start = getattr(self, '_refine_start_time', None)
+      if start is not None:
+        elapsed = max(0.0, time.time() - start)
+      else:
+        elapsed = 0.0
+      self._session_refine_time += elapsed
+      # stop refine state and reset activity timestamp so idle doesn't jump
+      self._in_refine = False
+      self._last_activity_time = time.time()
+      self._mark_activity()
+      try:
+        # remove LM marker from caller to avoid confusing wrapper
+        if hasattr(caller, '_timerplus_started_by_lm'):
+          del caller._timerplus_started_by_lm
+      except Exception:
+        pass
+    except Exception:
+      pass
+
+  def _unregister_refine_timing(self):
+    """Unregister listeners registered with RunPrg.LM."""
+    try:
+      if LM is not None and self._registered_refine_listeners:
+        try:
+          LM.unregister_listener(self._on_refine_start, "onStart")
+        except Exception:
+          pass
+        try:
+          LM.unregister_listener(self._on_refine_end, "onEnd")
+        except Exception:
+          pass
+        self._registered_refine_listeners = False
+    except Exception:
+      pass
+    # Restore any wrapped RunRefinementPrg.run
+    try:
+      if RunRefinementPrg is not None and self._orig_refine_run is not None:
+        try:
+          RunRefinementPrg.run = self._orig_refine_run
+        except Exception:
+          pass
+        self._orig_refine_run = None
+    except Exception:
+      pass
 
   def _start_refresh_timer(self):
     """Schedule recurring display refresh using olx.Schedule"""
@@ -317,6 +426,9 @@ class TimerPlus(PT):
     now = time.time()
     dt = max(0.0, now - self._idle_last_update)
     self._idle_last_update = now
+    # Do not accumulate idle while a refinement is in progress
+    if getattr(self, '_in_refine', False):
+      return self._idle_seconds
     if (now - self._last_activity_time) >= self._idle_grace:
       self._idle_seconds += dt
     return self._idle_seconds
@@ -415,7 +527,21 @@ class TimerPlus(PT):
       elapsed = time.time() - self.current_start_time
       idle = self._get_idle_seconds()
       work = max(0, elapsed - idle - self._session_refine_time)
-      
+
+      # If a refinement is currently running, avoid attributing work while autosaving.
+      if getattr(self, '_in_refine', False):
+        try:
+          # update metadata only (do not add work/refine/run totals)
+          if self.current_molecule in self.molecule_timings:
+            self.molecule_timings[self.current_molecule]['last_updated'] = time.strftime('%Y-%m-%d %H:%M:%S')
+            self.molecule_timings[self.current_molecule].setdefault('sNumPath', self.sNumPath)
+            self.molecule_timings[self.current_molecule].setdefault('sNum', self.sNum)
+            self.molecule_timings[self.current_molecule].setdefault('uuid', str(uuid.uuid4()))
+          self.save_timing_data()
+        except Exception:
+          pass
+        return
+
       if self.current_molecule in self.molecule_timings:
         self.molecule_timings[self.current_molecule]['total_work_time'] += work
         self.molecule_timings[self.current_molecule]['total_idle_time'] += idle
@@ -427,7 +553,7 @@ class TimerPlus(PT):
         self.molecule_timings[self.current_molecule].setdefault('sNum', self.sNum)
         self.molecule_timings[self.current_molecule].setdefault('uuid', str(uuid.uuid4()))
       self.save_timing_data()
-      
+
       # Reset timers to avoid double-counting
       self.current_start_time = time.time()
       if reset_idle:
@@ -486,6 +612,10 @@ class TimerPlus(PT):
     try:
       if self.current_molecule == "No structure loaded" or self.current_molecule is None:
         return 0.0
+      # If a refinement is in progress, do not count ongoing refine time as work
+      total_work = self.molecule_timings.get(self.current_molecule, {}).get('total_work_time', 0.0)
+      if getattr(self, '_in_refine', False):
+        return round(float(total_work), 1)
       if self.current_start_time is None:
         self.current_start_time = time.time()
         self._reset_idle_tracking(reset_gui=True)
@@ -494,7 +624,6 @@ class TimerPlus(PT):
       idle = self._get_idle_seconds()
       session_refine = self._session_refine_time
       work = max(0, elapsed - idle - session_refine)
-      total_work = self.molecule_timings.get(self.current_molecule, {}).get('total_work_time', 0.0)
       result = round(float(total_work + work), 1)
       return result
     except Exception:
@@ -545,12 +674,28 @@ class TimerPlus(PT):
       elapsed = max(0.0, time.time() - self.current_start_time)
     current_idle = self._get_idle_seconds()
 
-    totals = {
-      'WORK': self.molecule_timings[mol].get('total_work_time', 0.0) + max(0.0, elapsed - current_idle - self._session_refine_time),
-      'REFINE': self.molecule_timings[mol].get('total_refine_time', 0.0) + self._session_refine_time,
-      'IDLE': self.molecule_timings[mol].get('total_idle_time', 0.0) + current_idle,
-      'RUN': self.molecule_timings[mol].get('total_run_time', 0.0) + elapsed,
-    }
+    # If a refine is running, freeze work accumulation and show current refine time
+    if getattr(self, '_in_refine', False):
+      current_refine = 0.0
+      try:
+        start = getattr(self, '_refine_start_time', None)
+        if start is not None:
+          current_refine = max(0.0, time.time() - start)
+      except Exception:
+        current_refine = 0.0
+      totals = {
+        'WORK': self.molecule_timings[mol].get('total_work_time', 0.0),
+        'REFINE': self.molecule_timings[mol].get('total_refine_time', 0.0) + self._session_refine_time + current_refine,
+        'IDLE': self.molecule_timings[mol].get('total_idle_time', 0.0) + current_idle,
+        'RUN': self.molecule_timings[mol].get('total_run_time', 0.0) + elapsed,
+      }
+    else:
+      totals = {
+        'WORK': self.molecule_timings[mol].get('total_work_time', 0.0) + max(0.0, elapsed - current_idle - self._session_refine_time),
+        'REFINE': self.molecule_timings[mol].get('total_refine_time', 0.0) + self._session_refine_time,
+        'IDLE': self.molecule_timings[mol].get('total_idle_time', 0.0) + current_idle,
+        'RUN': self.molecule_timings[mol].get('total_run_time', 0.0) + elapsed,
+      }
 
     for item, seconds in totals.items():
       t = self._format_time(seconds)
