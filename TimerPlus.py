@@ -9,6 +9,8 @@ import olex_gui
 import time
 import json
 import uuid
+import re
+from datetime import datetime
 try:
   from RunPrg import RunRefinementPrg, LM
 except Exception:
@@ -52,8 +54,6 @@ class TimerPlus(PT):
     self.p_htm = p_htm
     self.p_img = p_img
     self.deal_with_phil(operation='read')
-    self.print_version_date()
-    
     # Initialize per-molecule timing system
     self.timing_data_file = os.path.join(instance_path, 'TimerPlus_history.json')
     self.molecule_timings = self.load_timing_data()
@@ -65,7 +65,6 @@ class TimerPlus(PT):
     self._session_refine_time = 0.0  # refine time accumulated since last save
     self._orig_refine_run = None
     self._registered_refine_listeners = False
-    self._in_refine = False
     self.sNumPath = None
     self.sNum = None
     self._refresh_interval = None
@@ -90,6 +89,7 @@ class TimerPlus(PT):
     OV.registerFunction(self.get_work_time_for_dataset,True,self.p_name)
     OV.registerFunction(self.update_timer_vars,True,self.p_name)
     OV.registerFunction(self._tick,True,self.p_name)
+    OV.registerFunction(self._retry_nospher,True,self.p_name)
     if not from_outside:
       self.setup_gui()
     # END Generated =======================================
@@ -218,81 +218,14 @@ class TimerPlus(PT):
     except Exception as e:
       print("TimerPlus: could not register refine listeners: %s" % str(e))
 
-    # Some refinement invocation paths call LM.startRun, others do not.
-    # Provide a minimal, safe wrapper on RunRefinementPrg.run as a fallback
-    # to ensure we always capture a start timestamp. The wrapper does NOT
-    # add elapsed time itself; LM.endRun/_on_refine_end will handle adding
-    # elapsed so we avoid double-counting.
-    try:
-      if RunRefinementPrg is not None:
-        # avoid double-wrapping
-        orig = getattr(RunRefinementPrg, 'run', None)
-        if orig is not None and not getattr(orig, '_timerplus_wrapped', False):
-          def _start_only_run(rp_self):
-            # If LM already marked start (caller attribute), don't double-mark.
-            marked_by_lm = getattr(rp_self, '_timerplus_started_by_lm', False)
-            start = None
-            try:
-              self._mark_activity()
-              if not marked_by_lm:
-                # record start time locally and mark instance so we know to add elapsed after
-                start = time.time()
-                rp_self._timerplus_started_by_timerplus = True
-                self._refine_start_time = start
-                self._in_refine = True
-                # prevent idle accumulation while refinement runs
-                self._last_activity_time = start
-              else:
-                # LM will handle timing; ensure we have a start time from LM handler
-                start = getattr(self, '_refine_start_time', None)
-            except Exception:
-              pass
-            # call original implementation
-            try:
-              return orig(rp_self)
-            finally:
-              # If we started timing here (LM did not), compute elapsed and add it
-              try:
-                if getattr(rp_self, '_timerplus_started_by_timerplus', False):
-                  end = time.time()
-                  st = start or getattr(self, '_refine_start_time', None)
-                  if st:
-                    elapsed = max(0.0, end - st)
-                    self._session_refine_time += elapsed
-                  # cleanup marker and refine state
-                  try:
-                    del rp_self._timerplus_started_by_timerplus
-                  except Exception:
-                    pass
-                  try:
-                    self._in_refine = False
-                    self._last_activity_time = time.time()
-                  except Exception:
-                    pass
-              except Exception:
-                pass
-
-          # tag and store original for safe restore
-          _start_only_run._timerplus_wrapped = True
-          self._orig_refine_run = orig
-          RunRefinementPrg.run = _start_only_run
-    except Exception as e:
-      print("TimerPlus: could not apply start-only wrapper: %s" % str(e))
-
   def _on_refine_start(self, caller):
     """Listener called by RunPrg when a run/refine starts."""
     try:
       self._mark_activity()
-      # mark both plugin and caller so the wrapper knows LM handled start
-      ts = time.time()
-      self._refine_start_time = ts
-      self._in_refine = True
-      # prevent idle accumulation during refine
-      self._last_activity_time = ts
-      try:
-        caller._timerplus_started_by_lm = True
-      except Exception:
-        pass
+      self._refine_start_time = time.time()
+      self._refine_active = True
+      # Keep idle clock timestamp current so no gap is counted on resume
+      self._idle_last_update = time.time()
     except Exception:
       pass
 
@@ -305,16 +238,21 @@ class TimerPlus(PT):
       else:
         elapsed = 0.0
       self._session_refine_time += elapsed
-      # stop refine state and reset activity timestamp so idle doesn't jump
-      self._in_refine = False
-      self._last_activity_time = time.time()
+      self._refine_active = False
+      # Advance the idle clock baseline so the refine period is not counted as idle
+      self._idle_last_update = time.time()
       self._mark_activity()
+      # After a refine ends, attempt to parse NoSpher output.
+      # Schedule a retry 4 s later so the file has time to be fully written.
       try:
-        # remove LM marker from caller to avoid confusing wrapper
-        if hasattr(caller, '_timerplus_started_by_lm'):
-          del caller._timerplus_started_by_lm
-      except Exception:
-        pass
+        print("TimerPlus: _on_refine_end -> scheduling _scan_and_apply_nospher in 4s")
+        olx.Schedule(4, "spy.TimerPlus._retry_nospher()")
+      except Exception as e:
+        print("TimerPlus: schedule failed, trying immediately:", e)
+        try:
+          self._scan_and_apply_nospher()
+        except Exception as e2:
+          print("TimerPlus: _scan_and_apply_nospher failed:", e2)
     except Exception:
       pass
 
@@ -331,16 +269,6 @@ class TimerPlus(PT):
         except Exception:
           pass
         self._registered_refine_listeners = False
-    except Exception:
-      pass
-    # Restore any wrapped RunRefinementPrg.run
-    try:
-      if RunRefinementPrg is not None and self._orig_refine_run is not None:
-        try:
-          RunRefinementPrg.run = self._orig_refine_run
-        except Exception:
-          pass
-        self._orig_refine_run = None
     except Exception:
       pass
 
@@ -391,6 +319,7 @@ class TimerPlus(PT):
         olex_gui.ResetIdleTime()
       except Exception:
         pass
+ 
 
   def _mark_activity(self):
     self._last_activity_time = time.time()
@@ -426,10 +355,8 @@ class TimerPlus(PT):
     now = time.time()
     dt = max(0.0, now - self._idle_last_update)
     self._idle_last_update = now
-    # Do not accumulate idle while a refinement is in progress
-    if getattr(self, '_in_refine', False):
-      return self._idle_seconds
-    if (now - self._last_activity_time) >= self._idle_grace:
+    # Do not count idle while refinement is running
+    if not getattr(self, '_refine_active', False) and (now - self._last_activity_time) >= self._idle_grace:
       self._idle_seconds += dt
     return self._idle_seconds
 
@@ -526,22 +453,10 @@ class TimerPlus(PT):
     if self.current_start_time is not None:
       elapsed = time.time() - self.current_start_time
       idle = self._get_idle_seconds()
-      work = max(0, elapsed - idle - self._session_refine_time)
-
-      # If a refinement is currently running, avoid attributing work while autosaving.
-      if getattr(self, '_in_refine', False):
-        try:
-          # update metadata only (do not add work/refine/run totals)
-          if self.current_molecule in self.molecule_timings:
-            self.molecule_timings[self.current_molecule]['last_updated'] = time.strftime('%Y-%m-%d %H:%M:%S')
-            self.molecule_timings[self.current_molecule].setdefault('sNumPath', self.sNumPath)
-            self.molecule_timings[self.current_molecule].setdefault('sNum', self.sNum)
-            self.molecule_timings[self.current_molecule].setdefault('uuid', str(uuid.uuid4()))
-          self.save_timing_data()
-        except Exception:
-          pass
-        return
-
+      # Deduct both the listener-tracked refine time and any NoSpher wall-clock time
+      wall_refine = self._session_refine_time + getattr(self, '_nospher_wall_clock', 0.0)
+      work = max(0, elapsed - idle - wall_refine)
+      
       if self.current_molecule in self.molecule_timings:
         self.molecule_timings[self.current_molecule]['total_work_time'] += work
         self.molecule_timings[self.current_molecule]['total_idle_time'] += idle
@@ -553,12 +468,13 @@ class TimerPlus(PT):
         self.molecule_timings[self.current_molecule].setdefault('sNum', self.sNum)
         self.molecule_timings[self.current_molecule].setdefault('uuid', str(uuid.uuid4()))
       self.save_timing_data()
-
+      
       # Reset timers to avoid double-counting
       self.current_start_time = time.time()
       if reset_idle:
         self._reset_idle_tracking(reset_gui=True)
       self._session_refine_time = 0.0
+      self._nospher_wall_clock = 0.0
   
   def _get_molecule_name_internal(self):
     """Internal method to get molecule name"""
@@ -573,6 +489,231 @@ class TimerPlus(PT):
         return "No structure loaded"
     except:
       return "No structure loaded"
+
+  def _find_nospher_files(self):
+    """Return a list of candidate NoSpher output files under the current sNumPath."""
+    try:
+      matches = []
+      mol = (self.current_molecule or '').strip()
+
+      # 1) Search the molecule's working directory (sNumPath)
+      base = self.sNumPath
+      if base and os.path.exists(base):
+        for root, dirs, files in os.walk(base):
+          for fn in files:
+            if 'nospher' in fn.lower() or (mol and mol.lower() in fn.lower() and 'nospher' in fn.lower()):
+              matches.append(os.path.join(root, fn))
+
+      # 2) Check the central DataDir 'samples/<mol>/' location (explicit location you provided)
+      try:
+        samples_dir = os.path.join(instance_path, 'samples', mol)
+        if os.path.exists(samples_dir):
+          for fn in os.listdir(samples_dir):
+            if 'nospher' in fn.lower() or (mol and mol.lower() in fn.lower()):
+              matches.append(os.path.join(samples_dir, fn))
+      except Exception:
+        pass
+
+      # 3) Fallback: search entire DataDir for files mentioning nospher (avoid deep recursion unless needed)
+      try:
+        data_samples = os.path.join(instance_path, 'samples')
+        if os.path.exists(data_samples):
+          for root, dirs, files in os.walk(data_samples):
+            for fn in files:
+              if 'nospher' in fn.lower() or (mol and mol.lower() in fn.lower()):
+                matches.append(os.path.join(root, fn))
+      except Exception:
+        pass
+
+      # Deduplicate and return
+      unique = []
+      seen = set()
+      for p in matches:
+        if p not in seen:
+          seen.add(p)
+          unique.append(p)
+      return unique
+    except Exception:
+      return []
+
+  def _parse_execution_time_from_file(self, filepath):
+    """Parse the duration of the most recent refinement from a NoSpher output file."""
+    try:
+      with open(filepath, 'r', errors='ignore') as f:
+        content = f.read(100000)
+
+      ts_pat = r'(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2}(?:\.\d+)?)'
+      start_re = re.compile(r'Refinement\s+start\w*\s+at:\s*' + ts_pat, re.I)
+      finish_re = re.compile(r'Refinement\s+finish\w*\s+at:\s*' + ts_pat, re.I)
+
+      def _parse_ts(s):
+        s = s.strip()
+        for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S',
+                    '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S'):
+          try:
+            return datetime.strptime(s, fmt)
+          except Exception:
+            pass
+        return None
+
+      starts = [(m.start(), m.group(1)) for m in start_re.finditer(content)]
+      finishes = [(m.start(), m.group(1)) for m in finish_re.finditer(content)]
+      print('TimerPlus: found %d start(s), %d finish(es) in %s' % (
+        len(starts), len(finishes), os.path.basename(filepath)))
+
+      # Return only the LAST finish/start pair (most recent refinement)
+      for fpos, fstr in reversed(finishes):
+        f_dt = _parse_ts(fstr)
+        if f_dt is None:
+          continue
+        for spos, sstr in reversed(starts):
+          if spos < fpos:
+            s_dt = _parse_ts(sstr)
+            if s_dt is not None:
+              delta = (f_dt - s_dt).total_seconds()
+              print('TimerPlus: last pair: %s -> %s = %.3fs' % (
+                sstr.strip(), fstr.strip(), delta))
+              if delta >= 0:
+                return float(delta)
+            break  # tried the closest start, no valid pair
+    except Exception as e:
+      print('TimerPlus: _parse_execution_time_from_file error:', e)
+    return None
+
+  def _get_nospher_refine_time_for_current(self):
+    """Find the most recent NoSpher output for the current molecule and parse its execution time."""
+    try:
+      mol = self.current_molecule
+      if not mol or mol == 'No structure loaded':
+        return None
+      files = self._find_nospher_files()
+      if not files:
+        print('TimerPlus: NoSpher search found no candidate files for', mol)
+        return None
+      # Score files so that explicit NoSpher outputs (e.g. "mol.NoSpherA2")
+      # are preferred over generic history files, then fall back to mtime.
+      def score_fp(fp):
+        bn = os.path.basename(fp).lower()
+        s = 0
+        # exact pattern like "<mol>.nospher" (or with suffix) gets highest priority
+        if bn.startswith(mol.lower() + '.nospher'):
+          s += 20
+        # files that contain 'nospher' get moderate priority
+        if 'nospher' in bn:
+          s += 10
+        # if filename mentions molecule anywhere, small boost
+        if mol.lower() in bn:
+          s += 2
+        # include modification time as tiebreaker (seconds since epoch)
+        try:
+          mtime = os.path.getmtime(fp)
+        except Exception:
+          mtime = 0
+        return (s, mtime)
+
+      files = sorted(files, key=lambda p: score_fp(p), reverse=True)
+      for fp in files:
+        name_ok = mol.lower() in os.path.basename(fp).lower()
+        try:
+          parsed = self._parse_execution_time_from_file(fp)
+        except Exception:
+          parsed = None
+        print('TimerPlus: checked NoSpher file:', fp, 'name_ok=', name_ok, 'parsed=', parsed)
+        if name_ok and parsed and parsed > 0:
+          return parsed
+      return None
+    except Exception:
+      return None
+
+  def _scan_and_apply_nospher(self):
+    """Locate a NoSpher output, parse execution time and apply to current molecule timing."""
+    try:
+      # Precondition: only run NoSpher parsing if user enabled NoSpherA2 in refine settings
+      try:
+        nospher_enabled = OV.GetParam('snum.NoSpherA2.use_aspherical', False)
+      except Exception:
+        nospher_enabled = False
+      if not nospher_enabled:
+        print('TimerPlus: _scan_and_apply_nospher -> NoSpherA2 not enabled, skipping')
+        return None
+
+      parsed = self._get_nospher_refine_time_for_current()
+      if parsed is None:
+        print('TimerPlus: _scan_and_apply_nospher -> no parsed time found')
+        return None
+      mol = self.current_molecule
+      if not mol or mol == 'No structure loaded':
+        print('TimerPlus: _scan_and_apply_nospher -> no current molecule')
+        return None
+
+      # Guard with file mtime so each refinement run is counted exactly once.
+      # Find the file mtime of the best candidate (same lookup as parsing).
+      files = self._find_nospher_files()
+      current_mtime = 0.0
+      if files:
+        def _score(fp):
+          bn = os.path.basename(fp).lower()
+          s = 20 if bn.startswith(mol.lower() + '.nospher') else (10 if 'nospher' in bn else 0)
+          s += 2 if mol.lower() in bn else 0
+          try:
+            return (s, os.path.getmtime(fp))
+          except Exception:
+            return (s, 0)
+        best = max(files, key=_score)
+        try:
+          current_mtime = os.path.getmtime(best)
+        except Exception:
+          current_mtime = 0.0
+
+      if mol not in self.molecule_timings:
+        self.molecule_timings[mol] = {}
+      last_mtime = float(self.molecule_timings[mol].get('last_nospher_mtime', 0.0))
+      if current_mtime <= last_mtime:
+        print('TimerPlus: _scan_and_apply_nospher -> file not newer (mtime=%.3f, last=%.3f), skipping' % (current_mtime, last_mtime))
+        return None
+
+      # New refinement result — add its duration to the running total.
+      old_refine = float(self.molecule_timings[mol].get('total_refine_time', 0.0))
+      self.molecule_timings[mol]['total_refine_time'] = old_refine + float(parsed)
+      self.molecule_timings[mol]['last_nospher_mtime'] = current_mtime
+      self.molecule_timings[mol]['last_updated'] = time.strftime('%Y-%m-%d %H:%M:%S')
+      # This refinement accumulated as idle (no mouse movement); correct it.
+      self._idle_seconds = max(0.0, self._idle_seconds - parsed)
+      old_stored_idle = float(self.molecule_timings[mol].get('total_idle_time', 0.0))
+      self.molecule_timings[mol]['total_idle_time'] = max(0.0, old_stored_idle - parsed)
+      print('TimerPlus: corrected idle by -%.3fs (refine duration)' % parsed)
+      try:
+        self.save_timing_data()
+      except Exception as e:
+        print('TimerPlus: saving timing data failed:', e)
+      # Save the wall-clock duration separately so work deduction stays correct,
+      # then zero out _session_refine_time so the display never double-counts
+      # (total_refine_time from the file is already the authoritative value).
+      self._nospher_wall_clock = float(self._session_refine_time)
+      self._session_refine_time = 0.0
+      print('TimerPlus: applied NoSpher refine time for %s -> %.3f seconds' % (mol, parsed))
+      return parsed
+    except Exception as e:
+      print('TimerPlus: error in _scan_and_apply_nospher:', e)
+      return None
+
+  def _retry_nospher(self):
+    """Called by olx.Schedule a few seconds after refine end to parse NoSpher output."""
+    try:
+      print("TimerPlus: _retry_nospher -> invoking _scan_and_apply_nospher()")
+      self._scan_and_apply_nospher()
+    except Exception as e:
+      print("TimerPlus: _retry_nospher failed:", e)
+
+  def test_parse_file(self, filepath):
+    """Diagnostic: parse a specific file and return extracted seconds (or None)."""
+    try:
+      parsed = self._parse_execution_time_from_file(filepath)
+      print('TimerPlus: test_parse_file ->', filepath, '=>', parsed)
+      return parsed
+    except Exception as e:
+      print('TimerPlus: test_parse_file error for', filepath, ':', e)
+      return None
 
   def print_formula(self):
     self.check_and_switch_molecule(do_autosave=False)
@@ -612,10 +753,6 @@ class TimerPlus(PT):
     try:
       if self.current_molecule == "No structure loaded" or self.current_molecule is None:
         return 0.0
-      # If a refinement is in progress, do not count ongoing refine time as work
-      total_work = self.molecule_timings.get(self.current_molecule, {}).get('total_work_time', 0.0)
-      if getattr(self, '_in_refine', False):
-        return round(float(total_work), 1)
       if self.current_start_time is None:
         self.current_start_time = time.time()
         self._reset_idle_tracking(reset_gui=True)
@@ -624,6 +761,7 @@ class TimerPlus(PT):
       idle = self._get_idle_seconds()
       session_refine = self._session_refine_time
       work = max(0, elapsed - idle - session_refine)
+      total_work = self.molecule_timings.get(self.current_molecule, {}).get('total_work_time', 0.0)
       result = round(float(total_work + work), 1)
       return result
     except Exception:
@@ -674,28 +812,20 @@ class TimerPlus(PT):
       elapsed = max(0.0, time.time() - self.current_start_time)
     current_idle = self._get_idle_seconds()
 
-    # If a refine is running, freeze work accumulation and show current refine time
-    if getattr(self, '_in_refine', False):
-      current_refine = 0.0
-      try:
-        start = getattr(self, '_refine_start_time', None)
-        if start is not None:
-          current_refine = max(0.0, time.time() - start)
-      except Exception:
-        current_refine = 0.0
-      totals = {
-        'WORK': self.molecule_timings[mol].get('total_work_time', 0.0),
-        'REFINE': self.molecule_timings[mol].get('total_refine_time', 0.0) + self._session_refine_time + current_refine,
-        'IDLE': self.molecule_timings[mol].get('total_idle_time', 0.0) + current_idle,
-        'RUN': self.molecule_timings[mol].get('total_run_time', 0.0) + elapsed,
-      }
-    else:
-      totals = {
-        'WORK': self.molecule_timings[mol].get('total_work_time', 0.0) + max(0.0, elapsed - current_idle - self._session_refine_time),
-        'REFINE': self.molecule_timings[mol].get('total_refine_time', 0.0) + self._session_refine_time,
-        'IDLE': self.molecule_timings[mol].get('total_idle_time', 0.0) + current_idle,
-        'RUN': self.molecule_timings[mol].get('total_run_time', 0.0) + elapsed,
-      }
+    try:
+      nospher_enabled = bool(OV.GetParam('snum.NoSpherA2.use_aspherical', False))
+    except Exception:
+      nospher_enabled = False
+    # When NoSpher is enabled, total_refine_time is authoritative (set from the file)
+    # and _session_refine_time has been zeroed out in _scan_and_apply_nospher.
+    # For work, deduct both session refine and any NoSpher wall-clock.
+    wall_refine = self._session_refine_time + getattr(self, '_nospher_wall_clock', 0.0)
+    totals = {
+      'WORK': self.molecule_timings[mol].get('total_work_time', 0.0) + max(0.0, elapsed - current_idle - wall_refine),
+      'REFINE': self.molecule_timings[mol].get('total_refine_time', 0.0) + self._session_refine_time,
+      'IDLE': self.molecule_timings[mol].get('total_idle_time', 0.0) + current_idle,
+      'RUN': self.molecule_timings[mol].get('total_run_time', 0.0) + elapsed,
+    }
 
     for item, seconds in totals.items():
       t = self._format_time(seconds)
