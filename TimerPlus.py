@@ -90,6 +90,7 @@ class TimerPlus(PT):
     OV.registerFunction(self.update_timer_vars,True,self.p_name)
     OV.registerFunction(self._tick,True,self.p_name)
     OV.registerFunction(self._retry_nospher,True,self.p_name)
+    OV.registerFunction(self.getPublicationContact, True, self.p_name)
     if not from_outside:
       self.setup_gui()
     # END Generated =======================================
@@ -107,7 +108,7 @@ class TimerPlus(PT):
     self.check_and_switch_molecule()
 
     # Initialise display variables so the HTML panel never shows missing-var errors
-    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN'):
+    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN', 'TIMER_USER'):
       OV.SetVar(_var, '')
     self.update_timer_vars()
 
@@ -152,14 +153,171 @@ class TimerPlus(PT):
         return {}
     except:
       return {}
+
+  def _get_user_info(self):
+    """Resolve publication contact using: GUI control → params → DB.
+
+    Returns dict: {'id', 'displayname', 'email', 'affiliationid'}.
+    Prefer the first non-empty source. No OS fallback.
+    """
+    info = {'id': None, 'displayname': None, 'email': None, 'affiliationid': None}
+
+    # Helper to attempt resolving a literal value via persons DB
+    def _resolve_via_db(val, persons):
+      if not val:
+        return None
+      # Try person lookup by arbitrary value
+      try:
+        pid = None
+        try:
+          pid = persons.findPersonId(val)
+        except Exception:
+          pass
+        if not pid:
+          try:
+            pid = int(val)
+          except Exception:
+            pid = None
+        if pid:
+          try:
+            p = persons.get_person(pid)
+            if p:
+              return {
+                'id': getattr(p, 'id', None),
+                'displayname': p.get_display_name() if hasattr(p, 'get_display_name') else None,
+                'email': getattr(p, 'email', None),
+                'affiliationid': getattr(p, 'affiliationid', None)
+              }
+          except Exception:
+            return None
+      except Exception:
+        return None
+      return None
+
+    # Try GUI control first (live value shown in Report->Publications)
+    try:
+      ctrl_val = self.read_publication_contact_control()
+      if ctrl_val:
+        # Try DB resolution if available
+        try:
+          import userDictionaries
+          if getattr(userDictionaries, 'persons', None) is None:
+            try:
+              userDictionaries.init_userDictionaries()
+            except Exception:
+              try:
+                userDictionaries.DBConnection()
+              except Exception:
+                pass
+          persons = userDictionaries.persons
+        except Exception:
+          persons = None
+
+        if persons:
+          resolved = _resolve_via_db(ctrl_val, persons)
+          if resolved:
+            return resolved
+        # Fallback: use literal control string
+        info['displayname'] = str(ctrl_val)
+        return info
+    except Exception:
+      pass
+
+    # Next: try params (operator/submitter/user)
+    try:
+      try_names = [
+        OV.GetParam('snum.report.operator', None),
+        OV.GetParam('snum.report.submitter', None),
+        OV.GetParam('user.report.user', None),
+      ]
+    except Exception:
+      try_names = [None, None, None]
+
+    # Attempt to access DB-backed persons API once
+    persons = None
+    try:
+      import userDictionaries
+      if getattr(userDictionaries, 'persons', None) is None:
+        try:
+          userDictionaries.init_userDictionaries()
+        except Exception:
+          try:
+            userDictionaries.DBConnection()
+          except Exception:
+            pass
+      persons = userDictionaries.persons
+    except Exception:
+      persons = None
+
+    for name in try_names:
+      if not name:
+        continue
+      # Prefer DB resolution when possible
+      if persons:
+        resolved = _resolve_via_db(name, persons)
+        if resolved:
+          return resolved
+      # If not resolved via DB, treat as literal display name
+      info['displayname'] = str(name)
+      return info
+
+    return info
+
+  def _get_current_user_display(self):
+    """Return a short display name for the current GUI publication contact, or empty string."""
+    try:
+      ui = self._get_user_info()
+      if ui and ui.get('displayname'):
+        return str(ui.get('displayname'))
+      # Fallback to GUI control raw strings
+      try:
+        ctrl = self.read_publication_contact_control()
+        if ctrl and str(ctrl).strip() and str(ctrl) not in ('', '?'):
+          return str(ctrl)
+      except Exception:
+        pass
+    except Exception:
+      pass
+    return ''
+
+  def _sanitize_for_filename(self, name):
+    """Return a filesystem-safe version of name for use in filenames."""
+    try:
+      s = str(name)
+      # Replace path separators and problematic chars
+      for ch in ('/', '\\', ':', '*', '?', '"', '<', '>', '|'):
+        s = s.replace(ch, '_')
+      s = re.sub(r'\s+', '_', s).strip('_')
+      if not s:
+        s = 'unnamed'
+      return s
+    except Exception:
+      return 'unnamed'
   
   def save_timing_data(self):
     """Save timing history to JSON file"""
+    # Write atomically to avoid truncating the existing history file
     try:
-      with open(self.timing_data_file, 'w') as f:
-        json.dump(self.molecule_timings, f, indent=2)
+      tmp_fn = self.timing_data_file + '.tmp'
+      with open(tmp_fn, 'w', encoding='utf-8') as f:
+        json.dump(self.molecule_timings, f, indent=2, ensure_ascii=False, default=str)
+      try:
+        os.replace(tmp_fn, self.timing_data_file)
+      except Exception:
+        # Fallback to rename if replace not available
+        try:
+          os.remove(self.timing_data_file)
+        except Exception:
+          pass
+        os.rename(tmp_fn, self.timing_data_file)
     except Exception as e:
       print("Error saving timing data: %s" % str(e))
+      # Clean up temp file if present
+      try:
+        if os.path.exists(tmp_fn):
+          os.remove(tmp_fn)
+      except Exception:
+        pass
 
     """Save every tracked molecule to its own local _timer.json in its sNumPath directory."""
     for mol_name, mol_data in list(self.molecule_timings.items()):
@@ -167,9 +325,36 @@ class TimerPlus(PT):
         strdir = mol_data.get('sNumPath') or OV.StrDir()
         if not strdir:
           strdir = instance_path
-        fn = os.path.join(strdir, '%s_timer.json' % mol_name)
-        with open(fn, 'w') as f:
-          json.dump(mol_data, f, indent=2)
+        safe_name = self._sanitize_for_filename(mol_name)
+        fn = os.path.join(strdir, '%s_timer.json' % safe_name)
+        # Ensure per-molecule JSON contains a resolved user entry when available
+        try:
+          if not mol_data.get('user') or not mol_data.get('user', {}).get('displayname'):
+            # Prefer to populate from current molecule context
+            if mol_name == self.current_molecule:
+              try:
+                ui = self._get_user_info()
+                if ui and (ui.get('displayname') or ui.get('id')):
+                  mol_data['user'] = ui
+              except Exception:
+                pass
+        except Exception:
+          pass
+        # Write per-molecule file atomically to avoid partial/truncated files
+        try:
+          tmp_fn = fn + '.tmp'
+          with open(tmp_fn, 'w', encoding='utf-8') as f:
+            json.dump(mol_data, f, indent=2, ensure_ascii=False, default=str)
+          try:
+            os.replace(tmp_fn, fn)
+          except Exception:
+            try:
+              os.remove(fn)
+            except Exception:
+              pass
+            os.rename(tmp_fn, fn)
+        except Exception as e:
+          print("Error saving local timing data for %s: %s" % (mol_name, str(e)))
       except Exception as e:
         print("Error saving local timing data for %s: %s" % (mol_name, str(e)))
 
@@ -395,11 +580,111 @@ class TimerPlus(PT):
     except:
       return 0.0
 
+  # publication/contact helpers removed as requested
+
+  def getCurrentUserName(self):
+    try:
+      return ''
+    except Exception:
+      return ''
+
+  def getPublicationContact(self, param_name):
+    """Return a display name for the given publication param for GUI inputs.
+
+    Called from GUI as `spy.TimerPlus.getPublicationContact('snum.report.submitter')`.
+    Preference: param value -> DB lookup -> literal param -> empty string.
+    """
+    try:
+      if not param_name:
+        return ''
+      try:
+        val = OV.GetParam(param_name, None)
+      except Exception:
+        val = None
+      if not val:
+        return ''
+
+      # Try to resolve via userDictionaries persons DB
+      try:
+        import userDictionaries
+        if getattr(userDictionaries, 'persons', None) is None:
+          try:
+            userDictionaries.init_userDictionaries()
+          except Exception:
+            try:
+              userDictionaries.DBConnection()
+            except Exception:
+              pass
+        persons = userDictionaries.persons
+      except Exception:
+        persons = None
+
+      if persons:
+        try:
+          pid = None
+          try:
+            pid = persons.findPersonId(val)
+          except Exception:
+            pass
+          if not pid:
+            try:
+              pid = int(val)
+            except Exception:
+              pid = None
+          if pid:
+            p = persons.get_person(pid)
+            if p:
+              return p.get_display_name() if hasattr(p, 'get_display_name') else str(val)
+        except Exception:
+          pass
+
+      # Fallback: return literal param string
+      return str(val)
+    except Exception:
+      return ''
+
+  def read_publication_contact_control(self):
+    """Read Contact Author from Report->Publications GUI control."""
+    try:
+      # Prefer the CIF-backed GUI value (used in templates): _publ_contact_author_name
+      try:
+        cif_name = OV.get_cif_item('_publ_contact_author_name', None)
+      except Exception:
+        cif_name = None
+      if cif_name and str(cif_name).strip() and str(cif_name) not in ('', '?', "''"):
+        return str(cif_name)
+
+      # Fallback to the named GUI controls if present
+      try:
+        val = OV.GetControlValue('SET_SNUM_METACIF_OPERATOR')
+      except Exception:
+        val = None
+      if val and val not in ('', '?'):
+        return str(val)
+      try:
+        val2 = OV.GetControlValue('SET_SNUM_METACIF_SUBMITTER')
+      except Exception:
+        val2 = None
+      if val2 and val2 not in ('', '?'):
+        return str(val2)
+    except Exception:
+      pass
+    return ''
+
   # ------------------------------------------------------------------
 
   def check_and_switch_molecule(self, do_autosave=True):
     """Check if molecule has changed and switch timing context"""
-    mol_name = self._get_molecule_name_internal()
+    base_mol = self._get_molecule_name_internal()
+    # Determine user-scoped key so changing the publication contact creates a new entry
+    try:
+      user_display = self._get_current_user_display() or ''
+    except Exception:
+      user_display = ''
+    if user_display:
+      mol_name = f"{base_mol} [{user_display}]"
+    else:
+      mol_name = base_mol
     
     # Periodic auto-save (every 10 seconds)
     if do_autosave and time.time() - self._last_auto_save > self._save_interval:
@@ -416,6 +701,12 @@ class TimerPlus(PT):
       self.current_molecule = mol_name
       if mol_name != "No structure loaded":
         if mol_name not in self.molecule_timings:
+          # New user or new molecule — create fresh entry and attach base sNum
+          ui = None
+          try:
+            ui = self._get_user_info()
+          except Exception:
+            ui = None
           self.molecule_timings[mol_name] = {
             'total_work_time': 0.0,
             'total_idle_time': 0.0,
@@ -423,6 +714,8 @@ class TimerPlus(PT):
             'total_run_time': 0.0,
             'filepath': "",
             'sNum': OV.ModelSrc(),
+            'base_sNum': base_mol,
+            'user': ui or {},
             'uuid': str(uuid.uuid4()),
             'last_updated': time.strftime('%Y-%m-%d %H:%M:%S')
           }
@@ -433,12 +726,19 @@ class TimerPlus(PT):
     else:
       # Same molecule, ensure it exists in timings
       if mol_name != "No structure loaded" and mol_name not in self.molecule_timings:
+        ui = None
+        try:
+          ui = self._get_user_info()
+        except Exception:
+          ui = None
         self.molecule_timings[mol_name] = {
           'total_work_time': 0.0,
           'total_idle_time': 0.0,
           'total_refine_time': 0.0,
           'total_run_time': 0.0,
-          'last_updated': time.strftime('%Y-%m-%d %H:%M:%S')
+          'last_updated': time.strftime('%Y-%m-%d %H:%M:%S'),
+          'base_sNum': base_mol,
+          'user': ui or {}
         }
         self.save_timing_data()
         if self.current_start_time is None:
@@ -467,6 +767,78 @@ class TimerPlus(PT):
         self.molecule_timings[self.current_molecule].setdefault('sNumPath', self.sNumPath)
         self.molecule_timings[self.current_molecule].setdefault('sNum', self.sNum)
         self.molecule_timings[self.current_molecule].setdefault('uuid', str(uuid.uuid4()))
+        # Attach current user info if available and log it to a debug file
+        try:
+          user_info = self._get_user_info()
+          # Collect diagnostic values to aid debugging when resolution fails
+          try:
+            ctrl_checked = self.read_publication_contact_control() or ''
+          except Exception:
+            ctrl_checked = ''
+          try:
+            ctrl_raw = OV.GetControlValue('SET_SNUM_METACIF_OPERATOR') or ''
+          except Exception:
+            ctrl_raw = ''
+          try:
+            ctrl_submitter = OV.GetControlValue('SET_SNUM_METACIF_SUBMITTER') or ''
+          except Exception:
+            ctrl_submitter = ''
+          try:
+            param_operator = OV.GetParam('snum.report.operator', None) or ''
+          except Exception:
+            param_operator = ''
+          try:
+            param_submitter = OV.GetParam('snum.report.submitter', None) or ''
+          except Exception:
+            param_submitter = ''
+
+          # Attach diagnostics to the user_info for logging
+          user_info.setdefault('debug', {})
+          user_info['debug'].update({
+            'control_checked': str(ctrl_checked),
+            'control_raw': str(ctrl_raw),
+            'control_submitter': str(ctrl_submitter),
+            'param_operator': str(param_operator),
+            'param_submitter': str(param_submitter),
+          })
+
+          # If no displayname resolved, try direct control/param fallbacks here
+          source = 'db' if (user_info.get('displayname')) else None
+          if not user_info.get('displayname'):
+            try:
+              if ctrl_raw and str(ctrl_raw).strip() and str(ctrl_raw) not in ('?', ''):
+                user_info['displayname'] = str(ctrl_raw)
+                source = 'control'
+              elif ctrl_checked and str(ctrl_checked).strip() and str(ctrl_checked) not in ('?', ''):
+                user_info['displayname'] = str(ctrl_checked)
+                source = 'control'
+              elif ctrl_submitter and str(ctrl_submitter).strip() and str(ctrl_submitter) not in ('?', ''):
+                user_info['displayname'] = str(ctrl_submitter)
+                source = 'control'
+            except Exception:
+              pass
+          if not user_info.get('displayname'):
+            try:
+              if param_operator and str(param_operator).strip() and str(param_operator) not in ('?', ''):
+                user_info['displayname'] = str(param_operator)
+                source = 'param'
+              elif param_submitter and str(param_submitter).strip() and str(param_submitter) not in ('?', ''):
+                user_info['displayname'] = str(param_submitter)
+                source = 'param'
+            except Exception:
+              pass
+          if source is None:
+            source = 'none'
+          user_info['source'] = source
+          self.molecule_timings[self.current_molecule].setdefault('user', user_info)
+          try:
+            logp = os.path.join(instance_path, 'TimerPlus_debug.log')
+            with open(logp, 'a') as lf:
+              lf.write("%s\t%s\t%s\n" % (time.strftime('%Y-%m-%d %H:%M:%S'), self.current_molecule, json.dumps(user_info)))
+          except Exception:
+            pass
+        except Exception:
+          pass
       self.save_timing_data()
       
       # Reset timers to avoid double-counting
@@ -807,6 +1179,25 @@ class TimerPlus(PT):
         OV.SetControlValue('TIMER_MOL', mol)
       except Exception:
         pass
+    # Provide current user displayname for the UI
+    try:
+      user_display = ''
+      stored = self.molecule_timings.get(mol, {}).get('user', {})
+      if stored and stored.get('displayname'):
+        user_display = stored.get('displayname')
+      else:
+        try:
+          user_display = self._get_user_info().get('displayname') or ''
+        except Exception:
+          user_display = ''
+      OV.SetVar('TIMER_USER', user_display)
+      if push_controls:
+        try:
+          OV.SetControlValue('TIMER_USER', user_display)
+        except Exception:
+          pass
+    except Exception:
+      pass
     elapsed = 0.0
     if self.current_start_time is not None:
       elapsed = max(0.0, time.time() - self.current_start_time)
