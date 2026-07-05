@@ -91,6 +91,7 @@ class TimerPlus(PT):
     OV.registerFunction(self._tick,True,self.p_name)
     OV.registerFunction(self._retry_nospher,True,self.p_name)
     OV.registerFunction(self.getPublicationContact, True, self.p_name)
+    OV.registerFunction(self.show_history, True, self.p_name)
     if not from_outside:
       self.setup_gui()
     # END Generated =======================================
@@ -1338,6 +1339,20 @@ class TimerPlus(PT):
       )
     
     return "\n".join(html_rows)
+  
+  def show_history(self):
+    """Open a popup window showing the full timing history."""
+    try:
+      # Popup a simple HTML page bundled with the plugin that displays the history
+      wFilePath = os.path.join(self.p_path, 'timerplus_history.htm')
+      # Use a named popup so multiple calls reuse the same window
+      try:
+        olx.Popup('timerplus_history', wFilePath, b="tcr", t="TimerPlus History", w=800, h=500)
+      except Exception:
+        # Fallback to simple popup call without extra args
+        olx.Popup('timerplus_history', wFilePath)
+    except Exception as e:
+      print("TimerPlus: could not open history popup: %s" % str(e))
   
   def _format_time(self, seconds):
     """Format seconds as HH:MM:SS"""
