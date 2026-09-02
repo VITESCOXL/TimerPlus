@@ -8,7 +8,7 @@ TimerPlus{
       .type = str
       .help = The tool before which the TimerPlus GUI shall appear.
     }
-  refresh_interval = 3
+  refresh_interval = 0
     .type = int
     .help = Interval in seconds between automatic display refreshes (0 to disable).
 }

@@ -5,7 +5,7 @@ import os
 import olex
 import olx
 import olex_gui
-
+import OlexVFS
 import time
 import json
 import uuid
@@ -70,6 +70,7 @@ class TimerPlus(PT):
     self._refresh_interval = None
     self._refresh_active = False
     self._idle_seconds = 0.0
+    self._history_expanded = set()  # base molecule names currently expanded in the history popup
     self._idle_last_update = time.time()
     self._last_activity_time = time.time()
     self._idle_grace = float(OV.GetParam('TimerPlus.idle_grace', 2.0) or 2.0)
@@ -92,6 +93,14 @@ class TimerPlus(PT):
     OV.registerFunction(self._retry_nospher,True,self.p_name)
     OV.registerFunction(self.getPublicationContact, True, self.p_name)
     OV.registerFunction(self.show_history, True, self.p_name)
+    OV.registerFunction(self.edit_history, True, self.p_name)
+    OV.registerFunction(self.update_history, True, self.p_name)
+    OV.registerFunction(self.edit_history_for, True, self.p_name)
+    OV.registerFunction(self.update_history_from_popup, True, self.p_name)
+    OV.registerFunction(self.set_edit_work, True, self.p_name)
+    OV.registerFunction(self.toggle_history_group, True, self.p_name)
+    OV.registerFunction(self.toggle_all_in_one_history, True, self.p_name)
+    OV.registerFunction(self.get_history_graph_image_only, True, self.p_name)
     if not from_outside:
       self.setup_gui()
     # END Generated =======================================
@@ -109,40 +118,16 @@ class TimerPlus(PT):
     self.check_and_switch_molecule()
 
     # Initialise display variables so the HTML panel never shows missing-var errors
-    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN', 'TIMER_USER'):
+    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN', 'TIMER_WFN', 'TIMER_USER'):
       OV.SetVar(_var, '')
     self.update_timer_vars()
 
-    # Patch multiple datasets so work-time badges appear in multi-CIF dataset buttons
-    self._patch_multiple_dataset()
+    # Patch multiple datasets removed (was optional UI badge)
 
     # Start recurring display refresh based on phil refresh_interval
     self._start_refresh_timer()
 
-  def _patch_multiple_dataset(self):
-    try:
-      import gui.home as home_module
-      mds = home_module.mds
-      timer_instance = self
-      if not getattr(mds, '_timerplus_patched', False):
-        orig_list_datasets = mds.list_datasets
-
-        def patched_list_datasets(sort_key):
-          rv = orig_list_datasets(sort_key)
-          result = []
-          for entry in rv:
-            index, name, display, sk, do_show = entry
-            if do_show and name:
-              work_time = timer_instance.get_work_time_for_dataset(name)
-              if work_time:
-                display = '%s [%s]' % (display, work_time)
-            result.append((index, name, display, sk, do_show))
-          return result
-
-        mds.list_datasets = patched_list_datasets
-        mds._timerplus_patched = True
-    except Exception as e:
-      print('TimerPlus: could not patch mds: %s' % str(e))
+  # _patch_multiple_dataset removed — optional GUI badge feature disabled
 
   def load_timing_data(self):
     """Load timing history from JSON file"""
@@ -218,21 +203,9 @@ class TimerPlus(PT):
           resolved = _resolve_via_db(ctrl_val, persons)
           if resolved:
             return resolved
-        # Fallback: use literal control string
-        info['displayname'] = str(ctrl_val)
-        return info
     except Exception:
       pass
 
-    # Next: try params (operator/submitter/user)
-    try:
-      try_names = [
-        OV.GetParam('snum.report.operator', None),
-        OV.GetParam('snum.report.submitter', None),
-        OV.GetParam('user.report.user', None),
-      ]
-    except Exception:
-      try_names = [None, None, None]
 
     # Attempt to access DB-backed persons API once
     persons = None
@@ -250,17 +223,7 @@ class TimerPlus(PT):
     except Exception:
       persons = None
 
-    for name in try_names:
-      if not name:
-        continue
-      # Prefer DB resolution when possible
-      if persons:
-        resolved = _resolve_via_db(name, persons)
-        if resolved:
-          return resolved
-      # If not resolved via DB, treat as literal display name
-      info['displayname'] = str(name)
-      return info
+    # No parameter fallbacks remain; nothing more to resolve here
 
     return info
 
@@ -270,13 +233,7 @@ class TimerPlus(PT):
       ui = self._get_user_info()
       if ui and ui.get('displayname'):
         return str(ui.get('displayname'))
-      # Fallback to GUI control raw strings
-      try:
-        ctrl = self.read_publication_contact_control()
-        if ctrl and str(ctrl).strip() and str(ctrl) not in ('', '?'):
-          return str(ctrl)
-      except Exception:
-        pass
+      # Do not fallback to raw GUI control strings here
     except Exception:
       pass
     return ''
@@ -470,7 +427,6 @@ class TimerPlus(PT):
     self._refresh_interval = interval
     self._refresh_active = True
     olx.Schedule(interval, "spy.TimerPlus._tick()")
-    print("TimerPlus: olx.Schedule refresh started (interval=%s)" % str(interval))
 
   def _tick(self):
     """Called by olx.Schedule"""
@@ -583,12 +539,6 @@ class TimerPlus(PT):
 
   # publication/contact helpers removed as requested
 
-  def getCurrentUserName(self):
-    try:
-      return ''
-    except Exception:
-      return ''
-
   def getPublicationContact(self, param_name):
     """Return a display name for the given publication param for GUI inputs.
 
@@ -655,19 +605,12 @@ class TimerPlus(PT):
       if cif_name and str(cif_name).strip() and str(cif_name) not in ('', '?', "''"):
         return str(cif_name)
 
-      # Fallback to the named GUI controls if present
-      try:
-        val = OV.GetControlValue('SET_SNUM_METACIF_OPERATOR')
-      except Exception:
-        val = None
-      if val and val not in ('', '?'):
-        return str(val)
-      try:
-        val2 = OV.GetControlValue('SET_SNUM_METACIF_SUBMITTER')
-      except Exception:
-        val2 = None
-      if val2 and val2 not in ('', '?'):
-        return str(val2)
+      # Fallback to GUI controls is temporarily disabled during testing.
+      # Returning None here ensures only CIF-backed values are used.
+      # To re-enable live GUI fallbacks, restore the OV.GetControlValue calls.
+      # val = None
+      # val2 = None
+      pass
     except Exception:
       pass
     return ''
@@ -768,74 +711,20 @@ class TimerPlus(PT):
         self.molecule_timings[self.current_molecule].setdefault('sNumPath', self.sNumPath)
         self.molecule_timings[self.current_molecule].setdefault('sNum', self.sNum)
         self.molecule_timings[self.current_molecule].setdefault('uuid', str(uuid.uuid4()))
-        # Attach current user info if available and log it to a debug file
+        # Attach current user info if available (DB/CIF only; no literal fallbacks)
         try:
           user_info = self._get_user_info()
-          # Collect diagnostic values to aid debugging when resolution fails
           try:
-            ctrl_checked = self.read_publication_contact_control() or ''
-          except Exception:
-            ctrl_checked = ''
-          try:
-            ctrl_raw = OV.GetControlValue('SET_SNUM_METACIF_OPERATOR') or ''
-          except Exception:
-            ctrl_raw = ''
-          try:
-            ctrl_submitter = OV.GetControlValue('SET_SNUM_METACIF_SUBMITTER') or ''
-          except Exception:
-            ctrl_submitter = ''
-          try:
-            param_operator = OV.GetParam('snum.report.operator', None) or ''
-          except Exception:
-            param_operator = ''
-          try:
-            param_submitter = OV.GetParam('snum.report.submitter', None) or ''
-          except Exception:
-            param_submitter = ''
-
-          # Attach diagnostics to the user_info for logging
-          user_info.setdefault('debug', {})
-          user_info['debug'].update({
-            'control_checked': str(ctrl_checked),
-            'control_raw': str(ctrl_raw),
-            'control_submitter': str(ctrl_submitter),
-            'param_operator': str(param_operator),
-            'param_submitter': str(param_submitter),
-          })
-
-          # If no displayname resolved, try direct control/param fallbacks here
-          source = 'db' if (user_info.get('displayname')) else None
-          if not user_info.get('displayname'):
+            if user_info is None:
+              user_info = {}
+            user_info['source'] = 'db' if user_info.get('displayname') else 'none'
+            self.molecule_timings[self.current_molecule].setdefault('user', user_info)
             try:
-              if ctrl_raw and str(ctrl_raw).strip() and str(ctrl_raw) not in ('?', ''):
-                user_info['displayname'] = str(ctrl_raw)
-                source = 'control'
-              elif ctrl_checked and str(ctrl_checked).strip() and str(ctrl_checked) not in ('?', ''):
-                user_info['displayname'] = str(ctrl_checked)
-                source = 'control'
-              elif ctrl_submitter and str(ctrl_submitter).strip() and str(ctrl_submitter) not in ('?', ''):
-                user_info['displayname'] = str(ctrl_submitter)
-                source = 'control'
+              logp = os.path.join(instance_path, 'TimerPlus_debug.log')
+              with open(logp, 'a') as lf:
+                lf.write("%s\t%s\t%s\n" % (time.strftime('%Y-%m-%d %H:%M:%S'), self.current_molecule, json.dumps(user_info)))
             except Exception:
               pass
-          if not user_info.get('displayname'):
-            try:
-              if param_operator and str(param_operator).strip() and str(param_operator) not in ('?', ''):
-                user_info['displayname'] = str(param_operator)
-                source = 'param'
-              elif param_submitter and str(param_submitter).strip() and str(param_submitter) not in ('?', ''):
-                user_info['displayname'] = str(param_submitter)
-                source = 'param'
-            except Exception:
-              pass
-          if source is None:
-            source = 'none'
-          user_info['source'] = source
-          self.molecule_timings[self.current_molecule].setdefault('user', user_info)
-          try:
-            logp = os.path.join(instance_path, 'TimerPlus_debug.log')
-            with open(logp, 'a') as lf:
-              lf.write("%s\t%s\t%s\n" % (time.strftime('%Y-%m-%d %H:%M:%S'), self.current_molecule, json.dumps(user_info)))
           except Exception:
             pass
         except Exception:
@@ -1078,16 +967,6 @@ class TimerPlus(PT):
     except Exception as e:
       print("TimerPlus: _retry_nospher failed:", e)
 
-  def test_parse_file(self, filepath):
-    """Diagnostic: parse a specific file and return extracted seconds (or None)."""
-    try:
-      parsed = self._parse_execution_time_from_file(filepath)
-      print('TimerPlus: test_parse_file ->', filepath, '=>', parsed)
-      return parsed
-    except Exception as e:
-      print('TimerPlus: test_parse_file error for', filepath, ':', e)
-      return None
-
   def print_formula(self):
     self.check_and_switch_molecule(do_autosave=False)
     formula = {}
@@ -1229,6 +1108,17 @@ class TimerPlus(PT):
         except Exception:
           pass
 
+    try:
+      wfn_t = self._get_wavefunction_time_str(mol, self.molecule_timings.get(mol, {}))
+    except Exception:
+      wfn_t = 'N/A'
+    OV.SetVar('TIMER_WFN', wfn_t)
+    if push_controls:
+      try:
+        OV.SetControlValue('TIMER_WFN', wfn_t)
+      except Exception:
+        pass
+
   def refresh_display(self):
     """Refresh the display to show current timing"""
     self.check_and_switch_molecule(do_autosave=False)
@@ -1239,7 +1129,9 @@ class TimerPlus(PT):
   def reset_current_timing(self):
     """Reset timing for current molecule"""
     self._mark_activity()
-    mol_name = self._get_molecule_name_internal()
+    # Ensure we use the same molecule key format as stored in `molecule_timings`
+    self.check_and_switch_molecule(do_autosave=False)
+    mol_name = self.current_molecule
     if mol_name and mol_name != "No structure loaded":
       if mol_name in self.molecule_timings:
         del self.molecule_timings[mol_name]
@@ -1273,15 +1165,39 @@ class TimerPlus(PT):
     # Collect all molecules to display (including current even if not in history)
     molecules_to_show = {}
     
-    # Add all saved molecules
+    # Add all saved molecules (skip empty or placeholder keys)
     for mol_name, data in self.molecule_timings.items():
+      try:
+        if not mol_name or str(mol_name).strip() == '' or mol_name == "No structure loaded":
+          continue
+      except Exception:
+        continue
+      updated = data.get('last_updated', 'Unknown')
+      try:
+        s = str(updated).strip()
+        if s and s not in ('Unknown', 'Active Now'):
+          dt = None
+          try:
+            dt = datetime.fromisoformat(s)
+          except Exception:
+            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+              try:
+                dt = datetime.strptime(s, fmt)
+                break
+              except Exception:
+                pass
+          if dt is not None:
+            updated = dt.strftime('%Y-%m-%d %H:%M:%S')
+      except Exception:
+        pass
       molecules_to_show[mol_name] = {
         'work': data.get('total_work_time', 0.0),
         'refine': data.get('total_refine_time', 0.0),
         'idle': data.get('total_idle_time', 0.0),
         'total': data.get('total_run_time', 0.0),
-        'updated': data.get('last_updated', 'Unknown'),
-        'is_current': False
+        'updated': updated,
+        'is_current': False,
+        'base': self._get_base_molecule_name(mol_name, data)
       }
     
     # Current session refine for display
@@ -1304,42 +1220,174 @@ class TimerPlus(PT):
           'idle': current_idle,
           'total': current_total,
           'updated': "Active Now",
-          'is_current': True
+          'is_current': True,
+          'base': self._get_base_molecule_name(self.current_molecule, self.molecule_timings.get(self.current_molecule, {}))
         }
     
     if not molecules_to_show:
-      return "<tr><td style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
+      return "<tr><td colspan='8' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
+    
+    # Group entries by base molecule name so each molecule shows a single
+    # expandable row, with its individual branches revealed on click.
+    groups = {}
+    group_order = []
+    for mol_name, data in molecules_to_show.items():
+      base = data['base']
+      if base not in groups:
+        groups[base] = []
+        group_order.append(base)
+      groups[base].append((mol_name, data))
+    
+    def group_sort_key(base):
+      entries = groups[base]
+      is_current = any(d['is_current'] for _, d in entries)
+      updated = max((d['updated'] if d['updated'] != "Active Now" else "9999") for _, d in entries)
+      return (not is_current, updated)
+    
+    sorted_bases = sorted(group_order, key=group_sort_key, reverse=True)
     
     html_rows = []
-    # Sort by current first, then by last updated
-    sorted_molecules = sorted(
-      molecules_to_show.items(),
-      key=lambda x: (not x[1]['is_current'], x[1]['updated'] if x[1]['updated'] != "Active Now" else "9999"),
-      reverse=True
-    )
-    
-    for mol_name, data in sorted_molecules:
-      work_str = self._format_time(data['work'])
-      refine_str = self._format_time(data['refine'])
-      idle_str = self._format_time(data['idle'])
-      total_str = self._format_time(data['total'])
-      
-      # Highlight current molecule
-      bg_color = "#e8f4f8" if data['is_current'] else "#ffffff"
-      
-      html_rows.append(
-        "<tr style='background-color: %s;'>" % bg_color +
-        "<td width='25%%' style='padding:6px;'><b>%s</b></td>" % mol_name +
-        "<td width='15%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
-        "<td width='15%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
-        "<td width='15%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
-        "<td width='15%%' style='padding:6px; text-align:center;'>%s</td>" % total_str +
-        "<td width='15%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
-        "</tr>"
+    for base in sorted_bases:
+      entries = groups[base]
+      # Show branches within a group most-recent first, current first
+      entries.sort(
+        key=lambda x: (not x[1]['is_current'], x[1]['updated'] if x[1]['updated'] != "Active Now" else "9999"),
+        reverse=True
       )
+      is_expanded = base in self._history_expanded
+      html_rows.append(self._render_history_group_row(base, entries, is_expanded))
+      if is_expanded:
+        for mol_name, data in entries:
+          html_rows.append(self._render_history_branch_row(mol_name, data))
     
     return "\n".join(html_rows)
-  
+
+  def _get_base_molecule_name(self, mol_name, data):
+    """Return the base (grouping) name for a molecule history entry."""
+    try:
+      base = data.get('base_sNum')
+      if base:
+        return str(base)
+    except Exception:
+      pass
+    try:
+      m = re.match(r'^(.*)\s\[[^\]]*\]$', str(mol_name))
+      if m:
+        return m.group(1)
+    except Exception:
+      pass
+    return mol_name
+
+  def _render_history_group_row(self, base, entries, is_expanded):
+    """Render the summary row for a molecule group, with an expand/collapse toggle."""
+    work = sum(d['work'] for _, d in entries)
+    refine = sum(d['refine'] for _, d in entries)
+    idle = sum(d['idle'] for _, d in entries)
+    total = sum(d['total'] for _, d in entries)
+    is_current = any(d['is_current'] for _, d in entries)
+    updated = "Active Now" if is_current else max(d['updated'] for _, d in entries)
+    wfn_str = self._get_wavefunction_time_str(base, {'work': work})
+
+    bg_color = "#e8f4f8" if is_current else "#f7f7f7"
+    safe_base = str(base).replace("\\", "\\\\").replace("'", "\\'")
+    toggle_symbol = "-" if is_expanded else "+"
+    toggle_link = (
+      "<a href=\"spy.TimerPlus.toggle_history_group('%s')\" "
+      "style=\"display:inline-block; width:16px; text-align:center; border:1px solid #888; "
+      "margin-right:6px; text-decoration:none; font-weight:bold;\">%s</a>"
+      % (safe_base, toggle_symbol)
+    )
+    branch_count = len(entries)
+    branch_label = " <small>(%d branch%s)</small>" % (branch_count, "" if branch_count == 1 else "es")
+    return (
+      "<tr style='background-color: %s;'>" % bg_color +
+      "<td width='18%%' style='padding:6px;'>%s<b>%s</b>%s</td>" % (toggle_link, base, branch_label) +
+      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % self._format_time(work) +
+      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % self._format_time(refine) +
+      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % self._format_time(idle) +
+      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % self._format_time(total) +
+      "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
+      "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % updated +
+      "<td width='10%%' style='padding:6px; text-align:center;'>&nbsp;</td>" +
+      "</tr>"
+    )
+
+  def _render_history_branch_row(self, mol_name, data):
+    """Render a single indented branch row shown when its group is expanded."""
+    work_str = self._format_time(data['work'])
+    refine_str = self._format_time(data['refine'])
+    idle_str = self._format_time(data['idle'])
+    total_str = self._format_time(data['total'])
+    wfn_str = self._get_wavefunction_time_str(mol_name, data)
+
+    bg_color = "#e8f4f8" if data['is_current'] else "#ffffff"
+    safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
+    edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+    return (
+      "<tr style='background-color: %s;'>" % bg_color +
+      "<td width='18%%' style='padding:6px 6px 6px 26px;'>&#8627; %s</td>" % mol_name +
+      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
+      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
+      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
+      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % total_str +
+      "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
+      "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
+      "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
+      "</tr>"
+    )
+
+  def toggle_history_group(self, base_name):
+    """Toggle expand/collapse state of a molecule's branch list in the history popup."""
+    try:
+      if base_name in self._history_expanded:
+        self._history_expanded.discard(base_name)
+      else:
+        self._history_expanded.add(base_name)
+      try:
+        if olx.html.IsPopup('timerplus_history') == 'true':
+          self.show_history()
+      except Exception:
+        pass
+      try:
+        olx.html.Update()
+      except Exception:
+        pass
+    except Exception as e:
+      print("TimerPlus: could not toggle history group: %s" % str(e))
+
+  def get_history_graph_image_only(self):
+    """Return just the bar-graph image row from history-info.htm, without its Scale/Show-All-Bars/Prev-Next controls row."""
+    try:
+      raw = OlexVFS.read_from_olex('history-info.htm')
+      if not raw:
+        return ""
+      txt = raw.decode('utf-8') if isinstance(raw, bytes) else raw
+      m = re.search(r'<tr>.*?</tr>', txt, re.DOTALL)
+      return m.group(0) if m else txt
+    except Exception:
+      return ""
+
+  def toggle_all_in_one_history(self):
+    """Toggle the history graph's 'all in one' display and refresh this popup in place."""
+    try:
+      current = OV.GetParam('user.graphs.program_analysis.all_in_one_history')
+      OV.SetParam('user.graphs.program_analysis.all_in_one_history', not current)
+      try:
+        olex.m("spy.make_history_bars()")
+      except Exception:
+        pass
+      try:
+        if olx.html.IsPopup('timerplus_history') == 'true':
+          self.show_history()
+      except Exception:
+        pass
+      try:
+        olx.html.Update()
+      except Exception:
+        pass
+    except Exception as e:
+      print("TimerPlus: could not toggle all-in-one history: %s" % str(e))
+
   def show_history(self):
     """Open a popup window showing the full timing history."""
     try:
@@ -1353,13 +1401,485 @@ class TimerPlus(PT):
         olx.Popup('timerplus_history', wFilePath)
     except Exception as e:
       print("TimerPlus: could not open history popup: %s" % str(e))
-  
+
+  def edit_history(self):
+    """Open the edit form popup for timing history."""
+    try:
+      wFilePath = os.path.join(self.p_path, 'timerplus_history_edit.htm')
+      try:
+        olx.Popup('timerplus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=600, h=360)
+      except Exception:
+        olx.Popup('timerplus_history_edit', wFilePath)
+    except Exception as e:
+      print("TimerPlus: could not open edit history popup: %s" % str(e))
+
+  def edit_history_for(self, mol_name):
+    """Open the edit popup prefilled for a specific molecule name."""
+    try:
+      name = str(mol_name)
+      # Set TIMER_MOL so the popup template can read it immediately via GetVar
+      try:
+        OV.SetVar('TIMER_MOL', name)
+      except Exception:
+        pass
+      try:
+        OV.SetVar('TIMER_ORIG_MOL', name)
+      except Exception:
+        pass
+      # Also set time vars so inputs can be prefilled from template
+      try:
+        rec = self.molecule_timings.get(name, {})
+        work_val = self._format_time(float(rec.get('total_work_time', 0.0) or 0.0))
+        refine_val = self._format_time(float(rec.get('total_refine_time', 0.0) or 0.0))
+        idle_val = self._format_time(float(rec.get('total_idle_time', 0.0) or 0.0))
+        run_val = self._format_time(float(rec.get('total_run_time', 0.0) or 0.0))
+        try:
+          OV.SetVar('TIMER_WORK', work_val)
+        except Exception:
+          pass
+        try:
+          OV.SetVar('TIMER_REFINE', refine_val)
+        except Exception:
+          pass
+        try:
+          OV.SetVar('TIMER_IDLE', idle_val)
+        except Exception:
+          pass
+        try:
+          OV.SetVar('TIMER_RUN', run_val)
+        except Exception:
+          pass
+      except Exception:
+        pass
+      wFilePath = os.path.join(self.p_path, 'timerplus_history_edit.htm')
+      try:
+        olx.Popup('timerplus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=600, h=360)
+      except Exception:
+        olx.Popup('timerplus_history_edit', wFilePath)
+      # Ensure the fields are set after popup is created
+      try:
+        # Set the molecule display and the work time (try both qualified and bare names)
+        try:
+          olx.html.SetValue('timerplus_history_edit.EDIT_MOL', name)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('EDIT_MOL', name)
+        except Exception:
+          pass
+        try:
+          self.set_edit_work(name)
+        except Exception:
+          pass
+        # Also schedule a delayed prefill in case the popup wasn't ready yet
+        try:
+          safe = name.replace("\\", "\\\\").replace("'", "\\'")
+          olx.Schedule(1, "spy.TimerPlus.set_edit_work('%s')" % safe)
+        except Exception:
+          pass
+      except Exception:
+        pass
+    except Exception as e:
+      print("TimerPlus: could not open edit history popup: %s" % str(e))
+
   def _format_time(self, seconds):
     """Format seconds as HH:MM:SS"""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
     return "%02d:%02d:%02d" % (hours, minutes, secs)
+
+  def _parse_orca_total_runtime_seconds(self, log_path):
+    """Extract TOTAL RUN TIME from an ORCA .wfnlog file and return seconds."""
+    try:
+      if not log_path or not os.path.exists(log_path):
+        return None
+      runtime_line = None
+      with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+          if 'TOTAL RUN TIME:' in line:
+            runtime_line = line.strip()
+      if not runtime_line:
+        return None
+
+      m = re.search(
+        r'TOTAL RUN TIME:\s*(\d+)\s+days\s+(\d+)\s+hours\s+(\d+)\s+minutes\s+(\d+)\s+seconds(?:\s+(\d+)\s+msec)?',
+        runtime_line,
+        re.IGNORECASE
+      )
+      if not m:
+        return None
+
+      days = int(m.group(1))
+      hours = int(m.group(2))
+      minutes = int(m.group(3))
+      seconds = int(m.group(4))
+      msec = int(m.group(5) or 0)
+      return float(days * 86400 + hours * 3600 + minutes * 60 + seconds) + (float(msec) / 1000.0)
+    except Exception:
+      return None
+
+  def _find_wfnlog_for_molecule(self, mol_name, data=None):
+    """Resolve best .wfnlog path for a molecule entry."""
+    try:
+      rec = data or self.molecule_timings.get(mol_name, {}) or {}
+      base_name = str(rec.get('base_sNum') or mol_name or '').strip()
+      # Remove optional user suffix: "name [User]" -> "name"
+      if base_name.endswith(']') and ' [' in base_name:
+        base_name = base_name.rsplit(' [', 1)[0].strip()
+
+      candidate_dirs = []
+      sdir = rec.get('sNumPath') or rec.get('filepath')
+      if sdir and os.path.exists(sdir):
+        candidate_dirs.append(sdir)
+        candidate_dirs.append(os.path.join(sdir, 'olex2', 'Wfn_job'))
+        candidate_dirs.append(os.path.join(sdir, 'Wfn_job'))
+
+      # Fallback to Olex2 data samples area
+      if base_name:
+        candidate_dirs.append(os.path.join(instance_path, 'samples', base_name))
+        candidate_dirs.append(os.path.join(instance_path, 'samples', base_name, 'olex2', 'Wfn_job'))
+
+      checked = []
+      for dpath in candidate_dirs:
+        try:
+          if not dpath or not os.path.exists(dpath):
+            continue
+          for stem in (base_name, mol_name):
+            if not stem:
+              continue
+            p = os.path.join(dpath, '%s.wfnlog' % stem)
+            checked.append(p)
+            if os.path.exists(p):
+              return p
+        except Exception:
+          continue
+
+      # Last fallback: pick newest .wfnlog in candidate dirs
+      newest = None
+      newest_mtime = -1.0
+      for dpath in candidate_dirs:
+        try:
+          if not dpath or not os.path.exists(dpath):
+            continue
+          for fn in os.listdir(dpath):
+            if not fn.lower().endswith('.wfnlog'):
+              continue
+            p = os.path.join(dpath, fn)
+            mt = os.path.getmtime(p)
+            if mt > newest_mtime:
+              newest_mtime = mt
+              newest = p
+        except Exception:
+          continue
+      return newest
+    except Exception:
+      return None
+
+  def _get_wavefunction_time_str(self, mol_name, data=None):
+    """Return formatted wave-function runtime for molecule from its own .wfnlog or N/A."""
+    try:
+      p = self._find_wfnlog_for_molecule(mol_name, data)
+      sec = self._parse_orca_total_runtime_seconds(p)
+      if sec is None:
+        return 'N/A'
+      return self._format_time(sec)
+    except Exception:
+      return 'N/A'
+
+  
+
+  def _parse_time_str(self, tstr):
+    """Parse a time string (HH:MM:SS, MM:SS or seconds) into seconds (float)."""
+    try:
+      if not tstr:
+        return 0.0
+      s = str(tstr).strip()
+      parts = s.split(':')
+      parts = [p.strip() for p in parts if p.strip()!='']
+      if len(parts) == 1:
+        return float(parts[0])
+      if len(parts) == 2:
+        minutes = float(parts[0])
+        secs = float(parts[1])
+        return minutes * 60.0 + secs
+      if len(parts) >= 3:
+        hours = float(parts[-3])
+        minutes = float(parts[-2])
+        secs = float(parts[-1])
+        return hours * 3600.0 + minutes * 60.0 + secs
+    except Exception:
+      try:
+        return float(re.sub(r'[^0-9.]', '', str(tstr)))
+      except Exception:
+        return 0.0
+
+  def update_history(self, mol_name, work_time_str, refine_time_str=None, idle_time_str=None, run_time_str=None, orig_mol_name=None):
+    """Update stored timing values for `mol_name` and save to JSON.
+
+    If `orig_mol_name` is provided and differs, the existing entry is treated as a rename.
+    """
+    try:
+      if not mol_name:
+        return "No molecule specified"
+      mol = str(mol_name).strip()
+      if not mol:
+        return "No molecule specified"
+
+      orig = None
+      try:
+        if orig_mol_name is not None:
+          o = str(orig_mol_name).strip()
+          if o:
+            orig = o
+      except Exception:
+        orig = None
+
+      # Rename behavior: if user changed molecule name in edit popup,
+      # move the original record key instead of creating a duplicate row.
+      if orig and orig != mol and orig in self.molecule_timings:
+        moved = self.molecule_timings.pop(orig)
+        if mol not in self.molecule_timings:
+          self.molecule_timings[mol] = moved
+        else:
+          try:
+            for k, v in moved.items():
+              self.molecule_timings[mol].setdefault(k, v)
+          except Exception:
+            pass
+
+      work_secs = self._parse_time_str(work_time_str)
+      refine_secs = self._parse_time_str(refine_time_str) if refine_time_str is not None and str(refine_time_str).strip() != '' else None
+      idle_secs = self._parse_time_str(idle_time_str) if idle_time_str is not None and str(idle_time_str).strip() != '' else None
+      run_secs = self._parse_time_str(run_time_str) if run_time_str is not None and str(run_time_str).strip() != '' else None
+      if mol not in self.molecule_timings:
+        if refine_secs is None:
+          refine_secs = 0.0
+        if idle_secs is None:
+          idle_secs = 0.0
+        if run_secs is None:
+          run_secs = work_secs + refine_secs + idle_secs
+        self.molecule_timings[mol] = {
+          'total_work_time': work_secs,
+          'total_refine_time': refine_secs,
+          'total_idle_time': idle_secs,
+          'total_run_time': run_secs,
+          'last_updated': datetime.now().isoformat()
+        }
+      else:
+        rec = self.molecule_timings[mol]
+        rec['total_work_time'] = work_secs
+        if refine_secs is None:
+          try:
+            refine_secs = float(rec.get('total_refine_time', 0.0) or 0.0)
+          except Exception:
+            refine_secs = 0.0
+        if idle_secs is None:
+          try:
+            idle_secs = float(rec.get('total_idle_time', 0.0) or 0.0)
+          except Exception:
+            idle_secs = 0.0
+        rec['total_refine_time'] = refine_secs
+        rec['total_idle_time'] = idle_secs
+        if run_secs is None:
+          run_secs = work_secs + refine_secs + idle_secs
+        rec['total_run_time'] = run_secs
+        rec['last_updated'] = datetime.now().isoformat()
+      self.save_timing_data()
+      try:
+        olx.html.Update()
+      except Exception:
+        pass
+      return "Updated %s" % mol
+    except Exception as e:
+      return "Error updating history: %s" % str(e)
+
+  def update_history_from_popup(self):
+    """Read values from the edit popup controls (robust to naming) and update history."""
+    try:
+      # Try reading both qualified and bare control names for robustness
+      mol_name = None
+      for n in ('timerplus_history_edit.EDIT_MOL', 'EDIT_MOL'):
+        try:
+          v = olx.html.GetValue(n)
+          if v:
+            mol_name = v
+            break
+        except Exception:
+          continue
+      if not mol_name:
+        try:
+          mv = OV.GetVar('TIMER_MOL')
+          if mv:
+            mol_name = mv
+        except Exception:
+          pass
+      work = None
+      for n in ('timerplus_history_edit.EDIT_WORK', 'EDIT_WORK'):
+        try:
+          v = olx.html.GetValue(n)
+          if v is not None:
+            work = v
+            break
+        except Exception:
+          continue
+      if work is None or str(work).strip() == '':
+        try:
+          wv = OV.GetVar('TIMER_WORK')
+          if wv is not None:
+            work = wv
+        except Exception:
+          pass
+      refine = None
+      for n in ('timerplus_history_edit.EDIT_REFINE', 'EDIT_REFINE'):
+        try:
+          v = olx.html.GetValue(n)
+          if v is not None:
+            refine = v
+            break
+        except Exception:
+          continue
+      if refine is None or str(refine).strip() == '':
+        try:
+          rv = OV.GetVar('TIMER_REFINE')
+          if rv is not None:
+            refine = rv
+        except Exception:
+          pass
+
+      idle = None
+      for n in ('timerplus_history_edit.EDIT_IDLE', 'EDIT_IDLE'):
+        try:
+          v = olx.html.GetValue(n)
+          if v is not None:
+            idle = v
+            break
+        except Exception:
+          continue
+      if idle is None or str(idle).strip() == '':
+        try:
+          iv = OV.GetVar('TIMER_IDLE')
+          if iv is not None:
+            idle = iv
+        except Exception:
+          pass
+
+      run = None
+      for n in ('timerplus_history_edit.EDIT_RUN', 'EDIT_RUN'):
+        try:
+          v = olx.html.GetValue(n)
+          if v is not None:
+            run = v
+            break
+        except Exception:
+          continue
+      if run is None or str(run).strip() == '':
+        try:
+          tv = OV.GetVar('TIMER_RUN')
+          if tv is not None:
+            run = tv
+        except Exception:
+          pass
+      if not mol_name:
+        return 'No molecule selected'
+      if work is None:
+        return 'No work value'
+      orig_mol = None
+      try:
+        ov = OV.GetVar('TIMER_ORIG_MOL')
+        if ov:
+          orig_mol = ov
+      except Exception:
+        pass
+      if not orig_mol:
+        try:
+          ov = OV.GetVar('TIMER_MOL')
+          if ov:
+            orig_mol = ov
+        except Exception:
+          pass
+
+      result = self.update_history(mol_name, work, refine, idle, run, orig_mol)
+      try:
+        OV.SetVar('TIMER_MOL', mol_name)
+      except Exception:
+        pass
+      try:
+        OV.SetVar('TIMER_ORIG_MOL', mol_name)
+      except Exception:
+        pass
+      try:
+        # Normalize the edit popup field to the saved value.
+        self.set_edit_work(mol_name)
+      except Exception:
+        pass
+      try:
+        # Rebuild the history popup so the updated JSON-backed values are visible.
+        self.show_history()
+      except Exception:
+        pass
+      try:
+        # Refresh the live timing values in the main UI as well.
+        self.update_timer_vars(push_controls=True)
+      except Exception:
+        pass
+      try:
+        olx.html.Update()
+      except Exception:
+        pass
+      return result
+    except Exception as e:
+      return 'Error reading popup values: %s' % str(e)
+
+  def set_edit_work(self, mol_name):
+    """Set all edit time input values for a given molecule name via olx.html.SetValue."""
+    try:
+      if not mol_name:
+        return ''
+      mol = str(mol_name)
+      rec = self.molecule_timings.get(mol, {})
+      work_val = self._format_time(float(rec.get('total_work_time', 0.0) or 0.0))
+      refine_val = self._format_time(float(rec.get('total_refine_time', 0.0) or 0.0))
+      idle_val = self._format_time(float(rec.get('total_idle_time', 0.0) or 0.0))
+      run_val = self._format_time(float(rec.get('total_run_time', 0.0) or 0.0))
+      try:
+        try:
+          olx.html.SetValue('timerplus_history_edit.EDIT_WORK', work_val)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('EDIT_WORK', work_val)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('timerplus_history_edit.EDIT_REFINE', refine_val)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('EDIT_REFINE', refine_val)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('timerplus_history_edit.EDIT_IDLE', idle_val)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('EDIT_IDLE', idle_val)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('timerplus_history_edit.EDIT_RUN', run_val)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('EDIT_RUN', run_val)
+        except Exception:
+          pass
+      except Exception:
+        pass
+    except Exception:
+      pass
+    return ''
 
   def get_work_time_for_dataset(self, dataset_name):
     """Return formatted HH:MM:SS work time for a named dataset from its _timer.json, or '' if unavailable."""
@@ -1376,42 +1896,6 @@ class TimerPlus(PT):
       return self._format_time(secs)
     except Exception:
       return ''
-  
-
-  def get_or_create_structure(directory, name):
-    json_path = os.path.join(directory, f"{name}_worklog.json")
-    
-    if os.path.exists(json_path):
-      with open(json_path) as f:
-        data = json.load(f)
-      uuid = data["structure_uuid"]
-    else:
-      uuid = str(uuid4())
-      # JSON will be written when the first session is recorded
-    
-    conn = DBConnection().conn
-    row = conn.execute(
-      "SELECT id, directory FROM structure WHERE uuid = ?", (uuid,)
-    ).fetchone()
-    
-    if row:
-      struct_id, known_dir = row
-      if os.path.normpath(known_dir) != os.path.normpath(directory):
-        logger.info("Structure %r moved from %r to %r.", name, known_dir, directory)
-        conn.execute(
-          "UPDATE structure SET directory = ?, name = ? WHERE id = ?",
-          (directory, name, struct_id)
-        )
-        conn.commit()
-      return struct_id
-    
-    # First time this structure has been seen by the DB
-    cursor = conn.execute(
-      "INSERT INTO structure (uuid, directory, name) VALUES (?, ?, ?)",
-      (uuid, directory, name)
-    )
-    conn.commit()
-    return cursor.lastrowid  
   
 
 TimerPlus_instance = TimerPlus()

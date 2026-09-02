@@ -5,12 +5,14 @@
   <td>
     <table width='100%' border='0' cellpadding='4' cellspacing='0'>
       <tr style='background-color: #f0f0f0;'>
-        <td width='25%' style='padding:6px; text-align:center;'><b>Molecule</b></td>
-        <td width='15%' style='padding:6px; text-align:center;'><b>Work Time</b></td>
-        <td width='15%' style='padding:6px; text-align:center;'><b>Refine Time</b></td>
-        <td width='15%' style='padding:6px; text-align:center;'><b>Idle Time</b></td>
-        <td width='15%' style='padding:6px; text-align:center;'><b>Total Time</b></td>
-        <td width='15%' style='padding:6px; text-align:center;'><b>Status</b></td>
+        <td width='18%' style='padding:6px; text-align:center;'><b>Molecule</b></td>
+        <td width='12%' style='padding:6px; text-align:center;'><b>Work Time</b></td>
+        <td width='12%' style='padding:6px; text-align:center;'><b>Refine Time</b></td>
+        <td width='12%' style='padding:6px; text-align:center;'><b>Idle Time</b></td>
+        <td width='12%' style='padding:6px; text-align:center;'><b>Total Time</b></td>
+        <td width='14%' style='padding:6px; text-align:center;'><b>Wave Function Time</b></td>
+        <td width='10%' style='padding:6px; text-align:center;'><b>Status</b></td>
+        <td width='10%' style='padding:6px; text-align:center;'><b>Edit</b></td>
       </tr>
       $spy.TimerPlus.get_timing_history()
     </table>
@@ -48,6 +50,18 @@
     html.Snippet(GetVar(default_link),
     "value=Open Folder",
     "onclick=shell C:\Program Files\Olex2-1.5/util/pyUtil/PluginLib//plugin-TimerPlus",
+    )$-
+
+    $+
+    html.Snippet(GetVar(default_link),
+    "value=Refresh",
+    "onclick=spy.TimerPlus.refresh_display()",
+    )$-
+
+    $+
+    html.Snippet(GetVar(default_link),
+    "value=History",
+    "onclick=spy.TimerPlus.show_history()",
     )$-
   </td>
 <!-- #include row_table_off gui\blocks\row_table_off.htm;1; -->
