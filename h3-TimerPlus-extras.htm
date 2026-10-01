@@ -5,14 +5,12 @@
   <td>
     <table width='100%' border='0' cellpadding='4' cellspacing='0'>
       <tr style='background-color: #f0f0f0;'>
-        <td width='18%' style='padding:6px; text-align:center;'><b>Molecule</b></td>
-        <td width='12%' style='padding:6px; text-align:center;'><b>Work Time</b></td>
-        <td width='12%' style='padding:6px; text-align:center;'><b>Refine Time</b></td>
-        <td width='12%' style='padding:6px; text-align:center;'><b>Idle Time</b></td>
-        <td width='12%' style='padding:6px; text-align:center;'><b>Total Time</b></td>
-        <td width='14%' style='padding:6px; text-align:center;'><b>Wave Function Time</b></td>
-        <td width='10%' style='padding:6px; text-align:center;'><b>Status</b></td>
-        <td width='10%' style='padding:6px; text-align:center;'><b>Edit</b></td>
+        <td width='22%' style='padding:6px; text-align:center;'><b>Molecule</b></td>
+        <td width='14%' style='padding:6px; text-align:center;'><b>Work Time</b></td>
+        <td width='14%' style='padding:6px; text-align:center;'><b>Refine Time</b></td>
+        <td width='14%' style='padding:6px; text-align:center;'><b>Idle Time</b></td>
+        <td width='18%' style='padding:6px; text-align:center;'><b>Wave Function Time</b></td>
+        <td width='18%' style='padding:6px; text-align:center;'><b>Status</b></td>
       </tr>
       $spy.TimerPlus.get_timing_history()
     </table>
@@ -38,6 +36,17 @@
     html.Snippet(GetVar(default_link),
     "value=Reload Plugin",
     "onclick=py.run C:\Program Files\Olex2-1.5/util/pyUtil/PluginLib//plugin-TimerPlus/TimerPlus.py",
+    )$-
+
+    <b>Time Resolution:</b>
+    $+
+    html.Snippet("gui/snippets/input-combo",
+    "name=TIMERPLUS_TIME_RESOLUTION",
+    "items=Minute<-minute;Second<-second",
+    "value=spy.GetParam('TimerPlus.time_resolution')",
+    "width=130",
+    "readonly=true",
+    "onchange=spy.SetParam('TimerPlus.time_resolution',html.GetValue('~name~'))>>html.Update()",
     )$-
 
     $+

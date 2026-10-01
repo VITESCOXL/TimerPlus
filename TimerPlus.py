@@ -5,7 +5,7 @@ import os
 import olex
 import olx
 import olex_gui
-import OlexVFS
+
 import time
 import json
 import uuid
@@ -57,6 +57,7 @@ class TimerPlus(PT):
     # Initialize per-molecule timing system
     self.timing_data_file = os.path.join(instance_path, 'TimerPlus_history.json')
     self.molecule_timings = self.load_timing_data()
+    self._history_search_term = ""  # For filtering in history popup
     self.current_molecule = None
     self.current_start_time = None
     self.current_idle_start = None
@@ -70,7 +71,6 @@ class TimerPlus(PT):
     self._refresh_interval = None
     self._refresh_active = False
     self._idle_seconds = 0.0
-    self._history_expanded = set()  # base molecule names currently expanded in the history popup
     self._idle_last_update = time.time()
     self._last_activity_time = time.time()
     self._idle_grace = float(OV.GetParam('TimerPlus.idle_grace', 2.0) or 2.0)
@@ -82,6 +82,11 @@ class TimerPlus(PT):
     OV.registerFunction(self.get_running_time,True,self.p_name)
     OV.registerFunction(self.get_molecule_name,True,self.p_name)
     OV.registerFunction(self.get_timing_history,True,self.p_name)
+    OV.registerFunction(self.get_timing_history_popup,True,self.p_name)
+    OV.registerFunction(self.get_filtered_history_popup,True,self.p_name)
+    OV.registerFunction(self.filter_history_display,True,self.p_name)
+    OV.registerFunction(self.clear_history_filter,True,self.p_name)
+    OV.registerFunction(self.show_search_results,True,self.p_name)
     OV.registerFunction(self.update_timing,True,self.p_name)
     OV.registerFunction(self.reset_current_timing,True,self.p_name)
     OV.registerFunction(self.refresh_display,True,self.p_name)
@@ -94,13 +99,12 @@ class TimerPlus(PT):
     OV.registerFunction(self.getPublicationContact, True, self.p_name)
     OV.registerFunction(self.show_history, True, self.p_name)
     OV.registerFunction(self.edit_history, True, self.p_name)
+    OV.registerFunction(self.get_timing_edit_form, True, self.p_name)
     OV.registerFunction(self.update_history, True, self.p_name)
     OV.registerFunction(self.edit_history_for, True, self.p_name)
     OV.registerFunction(self.update_history_from_popup, True, self.p_name)
     OV.registerFunction(self.set_edit_work, True, self.p_name)
-    OV.registerFunction(self.toggle_history_group, True, self.p_name)
-    OV.registerFunction(self.toggle_all_in_one_history, True, self.p_name)
-    OV.registerFunction(self.get_history_graph_image_only, True, self.p_name)
+    OV.registerFunction(self._prefill_edit_popup, True, self.p_name)
     if not from_outside:
       self.setup_gui()
     # END Generated =======================================
@@ -332,15 +336,13 @@ class TimerPlus(PT):
       if self._on_file_changed not in olx.FileChangeListeners:
         olx.FileChangeListeners.append(self._on_file_changed)
     except Exception as e:
-      print("TimerPlus: could not register file-change listener: %s" % str(e))
+      pass
 
   def _on_file_changed(self, filetype):
     """Called automatically by Olex2 whenever a structure is opened."""
     try:
       self._mark_activity()
       self.check_and_switch_molecule()
-      if self.current_molecule and self.current_molecule != "No structure loaded":
-        print("TimerPlus: auto-started timing for '%s'" % self.current_molecule)
       try:
         olx.html.Update()
       except:
@@ -359,7 +361,7 @@ class TimerPlus(PT):
       LM.register_listener(self._on_refine_end, "onEnd")
       self._registered_refine_listeners = True
     except Exception as e:
-      print("TimerPlus: could not register refine listeners: %s" % str(e))
+      pass
 
   def _on_refine_start(self, caller):
     """Listener called by RunPrg when a run/refine starts."""
@@ -388,14 +390,14 @@ class TimerPlus(PT):
       # After a refine ends, attempt to parse NoSpher output.
       # Schedule a retry 4 s later so the file has time to be fully written.
       try:
-        print("TimerPlus: _on_refine_end -> scheduling _scan_and_apply_nospher in 4s")
+        pass
         olx.Schedule(4, "spy.TimerPlus._retry_nospher()")
       except Exception as e:
-        print("TimerPlus: schedule failed, trying immediately:", e)
+        pass
         try:
           self._scan_and_apply_nospher()
         except Exception as e2:
-          print("TimerPlus: _scan_and_apply_nospher failed:", e2)
+          pass
     except Exception:
       pass
 
@@ -519,11 +521,11 @@ class TimerPlus(PT):
     self._unregister_refine_timing()
 
   def get_session_time(self):
-    """Return the total seconds since Olex2 (the plugin) was launched."""
+    """Return formatted time since Olex2 (the plugin) was launched."""
     try:
-      return round(float(time.time() - self.session_start_time), 1)
+      return self._format_time(time.time() - self.session_start_time)
     except:
-      return 0.0
+      return self._format_time(0)
 
   def get_refine_time(self):
     """Get accumulated refinement time for current molecule."""
@@ -538,6 +540,12 @@ class TimerPlus(PT):
       return 0.0
 
   # publication/contact helpers removed as requested
+
+  def getCurrentUserName(self):
+    try:
+      return ''
+    except Exception:
+      return ''
 
   def getPublicationContact(self, param_name):
     """Return a display name for the given publication param for GUI inputs.
@@ -820,8 +828,6 @@ class TimerPlus(PT):
 
       starts = [(m.start(), m.group(1)) for m in start_re.finditer(content)]
       finishes = [(m.start(), m.group(1)) for m in finish_re.finditer(content)]
-      print('TimerPlus: found %d start(s), %d finish(es) in %s' % (
-        len(starts), len(finishes), os.path.basename(filepath)))
 
       # Return only the LAST finish/start pair (most recent refinement)
       for fpos, fstr in reversed(finishes):
@@ -833,13 +839,11 @@ class TimerPlus(PT):
             s_dt = _parse_ts(sstr)
             if s_dt is not None:
               delta = (f_dt - s_dt).total_seconds()
-              print('TimerPlus: last pair: %s -> %s = %.3fs' % (
-                sstr.strip(), fstr.strip(), delta))
               if delta >= 0:
                 return float(delta)
             break  # tried the closest start, no valid pair
     except Exception as e:
-      print('TimerPlus: _parse_execution_time_from_file error:', e)
+      pass
     return None
 
   def _get_nospher_refine_time_for_current(self):
@@ -850,7 +854,6 @@ class TimerPlus(PT):
         return None
       files = self._find_nospher_files()
       if not files:
-        print('TimerPlus: NoSpher search found no candidate files for', mol)
         return None
       # Score files so that explicit NoSpher outputs (e.g. "mol.NoSpherA2")
       # are preferred over generic history files, then fall back to mtime.
@@ -880,7 +883,6 @@ class TimerPlus(PT):
           parsed = self._parse_execution_time_from_file(fp)
         except Exception:
           parsed = None
-        print('TimerPlus: checked NoSpher file:', fp, 'name_ok=', name_ok, 'parsed=', parsed)
         if name_ok and parsed and parsed > 0:
           return parsed
       return None
@@ -896,16 +898,13 @@ class TimerPlus(PT):
       except Exception:
         nospher_enabled = False
       if not nospher_enabled:
-        print('TimerPlus: _scan_and_apply_nospher -> NoSpherA2 not enabled, skipping')
         return None
 
       parsed = self._get_nospher_refine_time_for_current()
       if parsed is None:
-        print('TimerPlus: _scan_and_apply_nospher -> no parsed time found')
         return None
       mol = self.current_molecule
       if not mol or mol == 'No structure loaded':
-        print('TimerPlus: _scan_and_apply_nospher -> no current molecule')
         return None
 
       # Guard with file mtime so each refinement run is counted exactly once.
@@ -931,7 +930,6 @@ class TimerPlus(PT):
         self.molecule_timings[mol] = {}
       last_mtime = float(self.molecule_timings[mol].get('last_nospher_mtime', 0.0))
       if current_mtime <= last_mtime:
-        print('TimerPlus: _scan_and_apply_nospher -> file not newer (mtime=%.3f, last=%.3f), skipping' % (current_mtime, last_mtime))
         return None
 
       # New refinement result — add its duration to the running total.
@@ -943,29 +941,25 @@ class TimerPlus(PT):
       self._idle_seconds = max(0.0, self._idle_seconds - parsed)
       old_stored_idle = float(self.molecule_timings[mol].get('total_idle_time', 0.0))
       self.molecule_timings[mol]['total_idle_time'] = max(0.0, old_stored_idle - parsed)
-      print('TimerPlus: corrected idle by -%.3fs (refine duration)' % parsed)
       try:
         self.save_timing_data()
       except Exception as e:
-        print('TimerPlus: saving timing data failed:', e)
+        pass
       # Save the wall-clock duration separately so work deduction stays correct,
       # then zero out _session_refine_time so the display never double-counts
       # (total_refine_time from the file is already the authoritative value).
       self._nospher_wall_clock = float(self._session_refine_time)
       self._session_refine_time = 0.0
-      print('TimerPlus: applied NoSpher refine time for %s -> %.3f seconds' % (mol, parsed))
       return parsed
     except Exception as e:
-      print('TimerPlus: error in _scan_and_apply_nospher:', e)
       return None
 
   def _retry_nospher(self):
     """Called by olx.Schedule a few seconds after refine end to parse NoSpher output."""
     try:
-      print("TimerPlus: _retry_nospher -> invoking _scan_and_apply_nospher()")
       self._scan_and_apply_nospher()
     except Exception as e:
-      print("TimerPlus: _retry_nospher failed:", e)
+      pass
 
   def print_formula(self):
     self.check_and_switch_molecule(do_autosave=False)
@@ -1196,8 +1190,7 @@ class TimerPlus(PT):
         'idle': data.get('total_idle_time', 0.0),
         'total': data.get('total_run_time', 0.0),
         'updated': updated,
-        'is_current': False,
-        'base': self._get_base_molecule_name(mol_name, data)
+        'is_current': False
       }
     
     # Current session refine for display
@@ -1220,187 +1213,197 @@ class TimerPlus(PT):
           'idle': current_idle,
           'total': current_total,
           'updated': "Active Now",
-          'is_current': True,
-          'base': self._get_base_molecule_name(self.current_molecule, self.molecule_timings.get(self.current_molecule, {}))
+          'is_current': True
         }
     
     if not molecules_to_show:
-      return "<tr><td colspan='8' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
-    
-    # Group entries by base molecule name so each molecule shows a single
-    # expandable row, with its individual branches revealed on click.
-    groups = {}
-    group_order = []
-    for mol_name, data in molecules_to_show.items():
-      base = data['base']
-      if base not in groups:
-        groups[base] = []
-        group_order.append(base)
-      groups[base].append((mol_name, data))
-    
-    def group_sort_key(base):
-      entries = groups[base]
-      is_current = any(d['is_current'] for _, d in entries)
-      updated = max((d['updated'] if d['updated'] != "Active Now" else "9999") for _, d in entries)
-      return (not is_current, updated)
-    
-    sorted_bases = sorted(group_order, key=group_sort_key, reverse=True)
+      return "<tr><td colspan='6' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
     
     html_rows = []
-    for base in sorted_bases:
-      entries = groups[base]
-      # Show branches within a group most-recent first, current first
-      entries.sort(
-        key=lambda x: (not x[1]['is_current'], x[1]['updated'] if x[1]['updated'] != "Active Now" else "9999"),
-        reverse=True
+    # Sort by current first, then by last updated
+    sorted_molecules = sorted(
+      molecules_to_show.items(),
+      key=lambda x: (not x[1]['is_current'], x[1]['updated'] if x[1]['updated'] != "Active Now" else "9999"),
+      reverse=True
+    )
+    
+    # Limit to 5 latest structures
+    sorted_molecules = sorted_molecules[:5]
+    
+    for mol_name, data in sorted_molecules:
+      work_str = self._format_time(data['work'])
+      refine_str = self._format_time(data['refine'])
+      idle_str = self._format_time(data['idle'])
+      wfn_str = self._get_wavefunction_time_str(mol_name, data)
+      
+      # Highlight current molecule
+      bg_color = "#e8f4f8" if data['is_current'] else "#ffffff"
+      
+      html_rows.append(
+        "<tr style='background-color: %s;'>" % bg_color +
+        "<td width='22%%' style='padding:6px;'><b>%s</b></td>" % mol_name +
+        "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
+        "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
+        "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
+        "<td width='18%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
+        "<td width='18%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
+        "</tr>"
       )
-      is_expanded = base in self._history_expanded
-      html_rows.append(self._render_history_group_row(base, entries, is_expanded))
-      if is_expanded:
-        for mol_name, data in entries:
-          html_rows.append(self._render_history_branch_row(mol_name, data))
     
     return "\n".join(html_rows)
+  
+  def get_timing_history_popup(self):
+    """Get formatted HTML table of ALL timing history for popup (no 5-item limit)"""
+    self.check_and_switch_molecule(do_autosave=False)
+    
+    # Get current session times
+    current_work = 0.0
+    current_idle = 0.0
+    current_total = 0.0
+    
+    if self.current_molecule and self.current_molecule != "No structure loaded" and self.current_start_time is not None:
+      elapsed = time.time() - self.current_start_time
+      idle = self._get_idle_seconds()
+      current_work = max(0, elapsed - idle - self._session_refine_time)
+      current_idle = idle
+      current_total = elapsed
+    
+    # Collect all molecules to display (including current even if not in history)
+    molecules_to_show = {}
+    
+    # Add all saved molecules (skip empty or placeholder keys)
+    for mol_name, data in self.molecule_timings.items():
+      try:
+        if not mol_name or str(mol_name).strip() == '' or mol_name == "No structure loaded":
+          continue
+      except Exception:
+        continue
+      updated = data.get('last_updated', 'Unknown')
+      try:
+        s = str(updated).strip()
+        if s and s not in ('Unknown', 'Active Now'):
+          dt = None
+          try:
+            dt = datetime.fromisoformat(s)
+          except Exception:
+            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+              try:
+                dt = datetime.strptime(s, fmt)
+                break
+              except Exception:
+                pass
+          if dt is not None:
+            updated = dt.strftime('%Y-%m-%d %H:%M:%S')
+      except Exception:
+        pass
+      molecules_to_show[mol_name] = {
+        'work': data.get('total_work_time', 0.0),
+        'refine': data.get('total_refine_time', 0.0),
+        'idle': data.get('total_idle_time', 0.0),
+        'total': data.get('total_run_time', 0.0),
+        'updated': updated,
+        'is_current': False
+      }
+    
+    # Current session refine for display
+    current_session_refine = self._session_refine_time
 
-  def _get_base_molecule_name(self, mol_name, data):
-    """Return the base (grouping) name for a molecule history entry."""
-    try:
-      base = data.get('base_sNum')
-      if base:
-        return str(base)
-    except Exception:
-      pass
-    try:
-      m = re.match(r'^(.*)\s\[[^\]]*\]$', str(mol_name))
-      if m:
-        return m.group(1)
-    except Exception:
-      pass
-    return mol_name
-
-  def _render_history_group_row(self, base, entries, is_expanded):
-    """Render the summary row for a molecule group, with an expand/collapse toggle."""
-    work = sum(d['work'] for _, d in entries)
-    refine = sum(d['refine'] for _, d in entries)
-    idle = sum(d['idle'] for _, d in entries)
-    total = sum(d['total'] for _, d in entries)
-    is_current = any(d['is_current'] for _, d in entries)
-    updated = "Active Now" if is_current else max(d['updated'] for _, d in entries)
-    wfn_str = self._get_wavefunction_time_str(base, {'work': work})
-
-    bg_color = "#e8f4f8" if is_current else "#f7f7f7"
-    safe_base = str(base).replace("\\", "\\\\").replace("'", "\\'")
-    toggle_symbol = "-" if is_expanded else "+"
-    toggle_link = (
-      "<a href=\"spy.TimerPlus.toggle_history_group('%s')\" "
-      "style=\"display:inline-block; width:16px; text-align:center; border:1px solid #888; "
-      "margin-right:6px; text-decoration:none; font-weight:bold;\">%s</a>"
-      % (safe_base, toggle_symbol)
-    )
-    branch_count = len(entries)
-    branch_label = " <small>(%d branch%s)</small>" % (branch_count, "" if branch_count == 1 else "es")
-    return (
-      "<tr style='background-color: %s;'>" % bg_color +
-      "<td width='18%%' style='padding:6px;'>%s<b>%s</b>%s</td>" % (toggle_link, base, branch_label) +
-      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % self._format_time(work) +
-      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % self._format_time(refine) +
-      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % self._format_time(idle) +
-      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % self._format_time(total) +
-      "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
-      "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % updated +
-      "<td width='10%%' style='padding:6px; text-align:center;'>&nbsp;</td>" +
-      "</tr>"
-    )
-
-  def _render_history_branch_row(self, mol_name, data):
-    """Render a single indented branch row shown when its group is expanded."""
-    work_str = self._format_time(data['work'])
-    refine_str = self._format_time(data['refine'])
-    idle_str = self._format_time(data['idle'])
-    total_str = self._format_time(data['total'])
-    wfn_str = self._get_wavefunction_time_str(mol_name, data)
-
-    bg_color = "#e8f4f8" if data['is_current'] else "#ffffff"
-    safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
-    edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
-    return (
-      "<tr style='background-color: %s;'>" % bg_color +
-      "<td width='18%%' style='padding:6px 6px 6px 26px;'>&#8627; %s</td>" % mol_name +
-      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
-      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
-      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
-      "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % total_str +
-      "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
-      "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
-      "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
-      "</tr>"
-    )
-
-  def toggle_history_group(self, base_name):
-    """Toggle expand/collapse state of a molecule's branch list in the history popup."""
-    try:
-      if base_name in self._history_expanded:
-        self._history_expanded.discard(base_name)
+    # Add or update current molecule
+    if self.current_molecule and self.current_molecule != "No structure loaded":
+      if self.current_molecule in molecules_to_show:
+        molecules_to_show[self.current_molecule]['work'] += current_work
+        molecules_to_show[self.current_molecule]['refine'] += current_session_refine
+        molecules_to_show[self.current_molecule]['idle'] += current_idle
+        molecules_to_show[self.current_molecule]['total'] += current_total
+        molecules_to_show[self.current_molecule]['updated'] = "Active Now"
+        molecules_to_show[self.current_molecule]['is_current'] = True
       else:
-        self._history_expanded.add(base_name)
-      try:
-        if olx.html.IsPopup('timerplus_history') == 'true':
-          self.show_history()
-      except Exception:
-        pass
-      try:
-        olx.html.Update()
-      except Exception:
-        pass
-    except Exception as e:
-      print("TimerPlus: could not toggle history group: %s" % str(e))
-
-  def get_history_graph_image_only(self):
-    """Return just the bar-graph image row from history-info.htm, without its Scale/Show-All-Bars/Prev-Next controls row."""
+        # Current molecule not in history yet, show it anyway
+        molecules_to_show[self.current_molecule] = {
+          'work': current_work,
+          'refine': current_session_refine,
+          'idle': current_idle,
+          'total': current_total,
+          'updated': "Active Now",
+          'is_current': True
+        }
+    
+    if not molecules_to_show:
+      return "<tr><td colspan='7' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
+    
+    html_rows = []
+    # Sort by current first, then by last updated
+    sorted_molecules = sorted(
+      molecules_to_show.items(),
+      key=lambda x: (not x[1]['is_current'], x[1]['updated'] if x[1]['updated'] != "Active Now" else "9999"),
+      reverse=True
+    )
+    
+    # NO 5-item limit for popup - show all
+    
+    for mol_name, data in sorted_molecules:
+      work_str = self._format_time(data['work'])
+      refine_str = self._format_time(data['refine'])
+      idle_str = self._format_time(data['idle'])
+      wfn_str = self._get_wavefunction_time_str(mol_name, data)
+      
+      # Highlight current molecule
+      bg_color = "#e8f4f8" if data['is_current'] else "#ffffff"
+      
+      # Escape single quotes for JS call
+      safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
+      edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+      html_rows.append(
+        "<tr style='background-color: %s;'>" % bg_color +
+        "<td width='18%%' style='padding:6px;'><b>%s</b></td>" % mol_name +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
+        "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
+        "<td width='22%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
+        "</tr>"
+      )
+    
+    return "\n".join(html_rows)
+  
+  def _get_history_popup_layout(self):
+    """Return popup dimensions and left/right positions within the Olex2 window."""
     try:
-      raw = OlexVFS.read_from_olex('history-info.htm')
-      if not raw:
-        return ""
-      txt = raw.decode('utf-8') if isinstance(raw, bytes) else raw
-      m = re.search(r'<tr>.*?</tr>', txt, re.DOTALL)
-      return m.group(0) if m else txt
+      window = [int(value) for value in olx.GetWindowSize().split(',')]
+      origin_x, origin_y, area_width, area_height = window[:4]
+      popup_width = max(240, min(800, (area_width - 36) // 2))
+      popup_height = max(240, min(500, area_height - 80))
+      top = origin_y + 40
+      left = origin_x + 12
+      right = left + popup_width + 12
+      return popup_width, popup_height, left, right, top
     except Exception:
-      return ""
-
-  def toggle_all_in_one_history(self):
-    """Toggle the history graph's 'all in one' display and refresh this popup in place."""
-    try:
-      current = OV.GetParam('user.graphs.program_analysis.all_in_one_history')
-      OV.SetParam('user.graphs.program_analysis.all_in_one_history', not current)
-      try:
-        olex.m("spy.make_history_bars()")
-      except Exception:
-        pass
-      try:
-        if olx.html.IsPopup('timerplus_history') == 'true':
-          self.show_history()
-      except Exception:
-        pass
-      try:
-        olx.html.Update()
-      except Exception:
-        pass
-    except Exception as e:
-      print("TimerPlus: could not toggle all-in-one history: %s" % str(e))
+      return 800, 500, None, None, None
 
   def show_history(self):
     """Open a popup window showing the full timing history."""
     try:
       # Popup a simple HTML page bundled with the plugin that displays the history
       wFilePath = os.path.join(self.p_path, 'timerplus_history.htm')
+      width, height, left, right, top = self._get_history_popup_layout()
       # Use a named popup so multiple calls reuse the same window
       try:
-        olx.Popup('timerplus_history', wFilePath, b="tcr", t="TimerPlus History", w=800, h=500)
+        olx.Popup('timerplus_history', wFilePath, b="tcr", t="TimerPlus History", w=width, h=height, x=left, y=top)
       except Exception:
         # Fallback to simple popup call without extra args
         olx.Popup('timerplus_history', wFilePath)
     except Exception as e:
       print("TimerPlus: could not open history popup: %s" % str(e))
+
+  def show_search_results(self):
+    """Open or refresh the separate search-results popup."""
+    wFilePath = os.path.join(self.p_path, 'timerplus_search_results.htm')
+    width, height, left, right, top = self._get_history_popup_layout()
+    try:
+      olx.Popup('timerplus_search_results', wFilePath, b="tcr", t="TimerPlus Search Results", w=width, h=height, x=right, y=top)
+    except Exception:
+      olx.Popup('timerplus_search_results', wFilePath)
 
   def edit_history(self):
     """Open the edit form popup for timing history."""
@@ -1482,10 +1485,39 @@ class TimerPlus(PT):
     except Exception as e:
       print("TimerPlus: could not open edit history popup: %s" % str(e))
 
+  def _prefill_edit_popup(self, mol_name):
+    """Helper scheduled to prefill popup controls if immediate SetValue failed."""
+    try:
+      name = str(mol_name)
+      try:
+        olx.html.SetValue('timerplus_history_edit.EDIT_MOL', name)
+      except Exception:
+        pass
+      try:
+        olx.html.SetValue('EDIT_MOL', name)
+      except Exception:
+        pass
+      try:
+        self.set_edit_work(name)
+      except Exception:
+        pass
+      try:
+        olx.html.Update()
+      except Exception:
+        pass
+    except Exception:
+      pass
+  
   def _format_time(self, seconds):
-    """Format seconds as HH:MM:SS"""
+    """Format seconds using the configured display resolution."""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
+    try:
+      resolution = str(OV.GetParam('TimerPlus.time_resolution', 'second')).lower()
+    except Exception:
+      resolution = 'second'
+    if resolution == 'minute':
+      return "%02d:%02d" % (hours, minutes)
     secs = int(seconds % 60)
     return "%02d:%02d:%02d" % (hours, minutes, secs)
 
@@ -1600,9 +1632,15 @@ class TimerPlus(PT):
       if len(parts) == 1:
         return float(parts[0])
       if len(parts) == 2:
-        minutes = float(parts[0])
-        secs = float(parts[1])
-        return minutes * 60.0 + secs
+        first = float(parts[0])
+        second = float(parts[1])
+        try:
+          minute_resolution = str(OV.GetParam('TimerPlus.time_resolution', 'second')).lower() == 'minute'
+        except Exception:
+          minute_resolution = False
+        if minute_resolution:
+          return first * 3600.0 + second * 60.0
+        return first * 60.0 + second
       if len(parts) >= 3:
         hours = float(parts[-3])
         minutes = float(parts[-2])
@@ -1613,6 +1651,18 @@ class TimerPlus(PT):
         return float(re.sub(r'[^0-9.]', '', str(tstr)))
       except Exception:
         return 0.0
+
+  def get_timing_edit_form(self):
+    """Return HTML form for editing a molecule's work time."""
+    try:
+      # Only include saved molecules that are NOT the currently active molecule
+      mols = [m for m in self.molecule_timings.keys() if m != self.current_molecule]
+      if not mols:
+        return "<div>No saved (non-active) molecules available to edit.</div>"
+      # We'll return a small placeholder; the real controls are rendered in the edit page via html.Snippet
+      return "<div><!-- edit form placeholder --></div>"
+    except Exception as e:
+      return "<div>Error generating edit form: %s</div>" % str(e)
 
   def update_history(self, mol_name, work_time_str, refine_time_str=None, idle_time_str=None, run_time_str=None, orig_mol_name=None):
     """Update stored timing values for `mol_name` and save to JSON.
@@ -1831,6 +1881,326 @@ class TimerPlus(PT):
     except Exception as e:
       return 'Error reading popup values: %s' % str(e)
 
+  def get_saved_molecules(self):
+    """Return items string for saved (non-active) molecules suitable for gui/snippets input-combo-td."""
+    try:
+      mols = []
+      for m in self.molecule_timings.keys():
+        try:
+          if m == self.current_molecule:
+            continue
+          if not m or str(m).strip() == '' or m == 'No structure loaded':
+            continue
+        except Exception:
+          continue
+        mols.append(m)
+      # If there are no saved non-active molecules, fall back to including the current molecule
+      if not mols and self.current_molecule and self.current_molecule != 'No structure loaded':
+        mols = [self.current_molecule]
+      items = ';'.join(["%s<-%s" % (m, m) for m in mols])
+      return items
+    except Exception:
+      return ''
+
+  def filter_history_display(self, search_term=""):
+    """Filter history display by search term from the Olex2 input field.
+    Reads TIMER_SEARCH variable which is populated by the native input field."""
+    try:
+      search_val = ""
+      
+      # Use parameter if provided
+      if search_term:
+        search_val = str(search_term).strip().lower()
+      else:
+        for control_name in ('timerplus_history.TIMER_SEARCH', 'TIMER_SEARCH'):
+          try:
+            val = olx.html.GetValue(control_name)
+            if val is not None:
+              search_val = str(val).strip().lower()
+              break
+          except Exception:
+            pass
+        if not search_val:
+          try:
+            val = OV.GetVar('TIMER_SEARCH')
+            if val is not None:
+              search_val = str(val).strip().lower()
+          except Exception:
+            pass
+      
+      self._history_search_term = search_val
+      self.show_search_results()
+    except Exception as e:
+      pass
+
+  def clear_history_filter(self):
+    """Clear the history filter and show all structures."""
+    try:
+      self._history_search_term = ""
+      for control_name in ('timerplus_history.TIMER_SEARCH', 'TIMER_SEARCH'):
+        try:
+          olx.html.SetValue(control_name, "")
+        except Exception:
+          pass
+      try:
+        OV.SetVar('TIMER_SEARCH', "")
+      except Exception:
+        pass
+      self.show_search_results()
+    except Exception:
+      pass
+  
+  def get_filtered_history_popup(self):
+    """Get formatted HTML table of timing history filtered by search term"""
+    search_term = self._history_search_term.lower().strip()
+    if not search_term:
+      return "<tr><td colspan='7' style='text-align:center; color:#666;'>Enter a structure name above and click Search.</td></tr>"
+
+    self.check_and_switch_molecule(do_autosave=False)
+    
+    # Get current session times
+    current_work = 0.0
+    current_idle = 0.0
+    current_total = 0.0
+    
+    if self.current_molecule and self.current_molecule != "No structure loaded" and self.current_start_time is not None:
+      elapsed = time.time() - self.current_start_time
+      idle = self._get_idle_seconds()
+      current_work = max(0, elapsed - idle - self._session_refine_time)
+      current_idle = idle
+      current_total = elapsed
+    
+    # Collect all molecules to display (including current even if not in history)
+    molecules_to_show = {}
+    
+    # Add all saved molecules (skip empty or placeholder keys)
+    for mol_name, data in self.molecule_timings.items():
+      try:
+        if not mol_name or str(mol_name).strip() == '' or mol_name == "No structure loaded":
+          continue
+      except Exception:
+        continue
+      updated = data.get('last_updated', 'Unknown')
+      try:
+        s = str(updated).strip()
+        if s and s not in ('Unknown', 'Active Now'):
+          dt = None
+          try:
+            dt = datetime.fromisoformat(s)
+          except Exception:
+            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+              try:
+                dt = datetime.strptime(s, fmt)
+                break
+              except Exception:
+                pass
+          if dt is not None:
+            updated = dt.strftime('%Y-%m-%d %H:%M:%S')
+      except Exception:
+        pass
+      molecules_to_show[mol_name] = {
+        'work': data.get('total_work_time', 0.0),
+        'refine': data.get('total_refine_time', 0.0),
+        'idle': data.get('total_idle_time', 0.0),
+        'total': data.get('total_run_time', 0.0),
+        'updated': updated,
+        'is_current': False
+      }
+    
+    # Current session refine for display
+    current_session_refine = self._session_refine_time
+
+    # Add or update current molecule
+    if self.current_molecule and self.current_molecule != "No structure loaded":
+      if self.current_molecule in molecules_to_show:
+        molecules_to_show[self.current_molecule]['work'] += current_work
+        molecules_to_show[self.current_molecule]['refine'] += current_session_refine
+        molecules_to_show[self.current_molecule]['idle'] += current_idle
+        molecules_to_show[self.current_molecule]['total'] += current_total
+        molecules_to_show[self.current_molecule]['updated'] = "Active Now"
+        molecules_to_show[self.current_molecule]['is_current'] = True
+      else:
+        # Current molecule not in history yet, show it anyway
+        molecules_to_show[self.current_molecule] = {
+          'work': current_work,
+          'refine': current_session_refine,
+          'idle': current_idle,
+          'total': current_total,
+          'updated': "Active Now",
+          'is_current': True
+        }
+    
+    if not molecules_to_show:
+      return "<tr><td colspan='7' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
+    
+    html_rows = []
+    # Sort by current first, then by last updated
+    sorted_molecules = sorted(
+      molecules_to_show.items(),
+      key=lambda x: (not x[1]['is_current'], x[1]['updated'] if x[1]['updated'] != "Active Now" else "9999"),
+      reverse=True
+    )
+    
+    total_count = len(sorted_molecules)
+    
+    # Apply search filter if search term is set
+    sorted_molecules = [
+      (name, data) for name, data in sorted_molecules
+      if search_term in name.lower()
+    ]
+    html_rows.append(
+      "<tr style='background-color: #fff8dc; font-weight: bold;'>" +
+      "<td colspan='7' style='text-align:center; color: #0066cc; padding: 8px;'>" +
+      "Found %d of %d structures matching '%s'" % (len(sorted_molecules), total_count, search_term) +
+      "</td></tr>"
+    )
+    if not sorted_molecules:
+      html_rows.append(
+        "<tr><td colspan='7' style='text-align:center;'>No structures found matching '%s'</td></tr>" % search_term
+      )
+    
+    # Show ALL (no 5-item limit for popup)
+    
+    for mol_name, data in sorted_molecules:
+      work_str = self._format_time(data['work'])
+      refine_str = self._format_time(data['refine'])
+      idle_str = self._format_time(data['idle'])
+      wfn_str = self._get_wavefunction_time_str(mol_name, data)
+      
+      # Highlight current molecule
+      bg_color = "#e8f4f8" if data['is_current'] else "#ffffff"
+      
+      # Escape single quotes for JS call
+      safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
+      edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+      html_rows.append(
+        "<tr style='background-color: %s;'>" % bg_color +
+        "<td width='18%%' style='padding:6px;'><b>%s</b></td>" % mol_name +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
+        "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
+        "<td width='22%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
+        "</tr>"
+      )
+    
+    return "\n".join(html_rows)
+
+  def get_search_results_html(self):
+    """Generate a dedicated search results section when searching."""
+    # If no search term, return empty (hide search results section)
+    if not self._history_search_term:
+      return ""
+    
+    search_term = self._history_search_term.lower()
+    
+    try:
+      molecules_dict = self._load_timing_data()
+      if not molecules_dict:
+        return ""
+      
+      molecules_to_show = {}
+      for mol_name, data in molecules_dict.items():
+        updated = "Active Now" if data.get('last_updated') == "Active Now" else "Never"
+        is_current = (mol_name == self._current_molecule_name)
+        
+        try:
+          if not updated or updated == "Never":
+            try:
+              s = data.get('last_updated')
+              if s:
+                dt = datetime.strptime(s, '%Y-%m-%d %H:%M:%S')
+                updated = dt.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+              for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+                try:
+                  dt = datetime.strptime(s, fmt)
+                  break
+                except Exception:
+                  pass
+              if dt is not None:
+                updated = dt.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+          pass
+        
+        molecules_to_show[mol_name] = {
+          'work': data.get('total_work_time', 0.0),
+          'refine': data.get('total_refine_time', 0.0),
+          'idle': data.get('total_idle_time', 0.0),
+          'total': data.get('total_run_time', 0.0),
+          'wfn': data.get('wave_function_time', {}),
+          'updated': updated,
+          'is_current': is_current
+        }
+      
+      # Sort by current first, then by last updated
+      sorted_molecules = sorted(
+        molecules_to_show.items(),
+        key=lambda x: (not x[1]['is_current'], x[1]['updated'] if x[1]['updated'] != "Active Now" else "9999"),
+        reverse=True
+      )
+      
+      # FILTER: Only keep molecules matching search term
+      filtered = [
+        (name, data) for name, data in sorted_molecules 
+        if search_term in name.lower()
+      ]
+      
+      if not filtered:
+        return (
+          "<h3 style='color: #c0392b; margin-top: 15px;'>🔍 Search Results</h3>" +
+          "<table style='border-collapse: collapse; width: 100%; background-color: #f9f9f9;'>" +
+          "<tr><td colspan='7' style='text-align:center; padding: 15px; color: #c0392b;'>" +
+          "No structures found matching '<b>%s</b>'</td></tr></table>" % search_term
+        )
+      
+      # Build search results HTML
+      html = (
+        "<h3 style='color: #0066cc; margin-top: 15px;'>🔍 Search Results</h3>" +
+        "<p style='font-size: 11px; color: #0066cc; margin: 5px 0;'>" +
+        "Found <b>%d</b> structure(s) matching '<b>%s</b>'</p>" % (len(filtered), search_term) +
+        "<table style='border-collapse: collapse; width: 100%; background-color: #f9f9f9;'>" +
+        "<tr style='background-color: #34495e;'>" +
+        "<th style='color: white; padding: 8px; text-align: left;'>Molecule Name</th>" +
+        "<th style='color: white; padding: 8px; text-align: center;'>Work Time</th>" +
+        "<th style='color: white; padding: 8px; text-align: center;'>Refine Time</th>" +
+        "<th style='color: white; padding: 8px; text-align: center;'>Idle Time</th>" +
+        "<th style='color: white; padding: 8px; text-align: center;'>Wave Function</th>" +
+        "<th style='color: white; padding: 8px; text-align: center;'>Last Updated</th>" +
+        "<th style='color: white; padding: 8px; text-align: center;'>Edit</th></tr>"
+      )
+      
+      # Add filtered rows
+      for mol_name, data in filtered:
+        work_str = self._format_time(data['work'])
+        refine_str = self._format_time(data['refine'])
+        idle_str = self._format_time(data['idle'])
+        wfn_str = self._get_wavefunction_time_str(mol_name, data)
+        
+        # Highlight current molecule
+        bg_color = "#d5eef7" if data['is_current'] else "#ffffff"
+        
+        # Escape single quotes for JS call
+        safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
+        edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+        html += (
+          "<tr style='background-color: %s; border: 1px solid #bdc3c7;'>" % bg_color +
+          "<td style='padding: 8px; width: 18%%;'><b>%s</b></td>" % mol_name +
+          "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % work_str +
+          "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % refine_str +
+          "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % idle_str +
+          "<td style='padding: 8px; text-align: center; width: 14%%;'>%s</td>" % wfn_str +
+          "<td style='padding: 8px; text-align: center; width: 10%%;'>%s</td>" % data['updated'] +
+          "<td style='padding: 8px; text-align: center; width: 22%%;'>%s</td></tr>" % edit_link
+        )
+      
+      html += "</table><br>"
+      return html
+      
+    except Exception as e:
+      return ""
+
   def set_edit_work(self, mol_name):
     """Set all edit time input values for a given molecule name via olx.html.SetValue."""
     try:
@@ -1898,13 +2268,44 @@ class TimerPlus(PT):
       return ''
   
 
+  def get_or_create_structure(directory, name):
+    json_path = os.path.join(directory, f"{name}_worklog.json")
+    
+    if os.path.exists(json_path):
+      with open(json_path) as f:
+        data = json.load(f)
+      uuid = data["structure_uuid"]
+    else:
+      uuid = str(uuid4())
+      # JSON will be written when the first session is recorded
+    
+    conn = DBConnection().conn
+    row = conn.execute(
+      "SELECT id, directory FROM structure WHERE uuid = ?", (uuid,)
+    ).fetchone()
+    
+    if row:
+      struct_id, known_dir = row
+      if os.path.normpath(known_dir) != os.path.normpath(directory):
+        logger.info("Structure %r moved from %r to %r.", name, known_dir, directory)
+        conn.execute(
+          "UPDATE structure SET directory = ?, name = ? WHERE id = ?",
+          (directory, name, struct_id)
+        )
+        conn.commit()
+      return struct_id
+    
+    # First time this structure has been seen by the DB
+    cursor = conn.execute(
+      "INSERT INTO structure (uuid, directory, name) VALUES (?, ?, ?)",
+      (uuid, directory, name)
+    )
+    conn.commit()
+    return cursor.lastrowid  
+  
+
 TimerPlus_instance = TimerPlus()
-print("TimerPlus loaded OK.")
 mol = TimerPlus_instance.current_molecule
-if mol and mol != "No structure loaded":
-  print("TimerPlus: timing started for '%s'" % mol)
-else:
-  print("TimerPlus: session timer running - timing will auto-start when a structure is opened.")
   
 def get_sNum_and_path():
   """Return a stable, globally unique identifier for the current structure."""

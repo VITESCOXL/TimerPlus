@@ -8,7 +8,11 @@ TimerPlus{
       .type = str
       .help = The tool before which the TimerPlus GUI shall appear.
     }
-  refresh_interval = 0
+  refresh_interval = 3
     .type = int
     .help = Interval in seconds between automatic display refreshes (0 to disable).
+  time_resolution = *minute second
+    .type = choice
+    .expert_level = 1
+    .help = Choose between HH:MM:SS and HH:MM timer displays.
 }
