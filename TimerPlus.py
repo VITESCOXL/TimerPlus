@@ -281,64 +281,51 @@ class TimerPlus(PT):
       except Exception:
         pass
 
-    """Save every tracked molecule to its own local _timer.json in its sNumPath directory."""
-    for mol_name, mol_data in list(self.molecule_timings.items()):
-      try:
-        strdir = mol_data.get('sNumPath') or OV.StrDir()
-        if not strdir:
-          strdir = instance_path
-        safe_name = self._sanitize_for_filename(mol_name)
-        fn = os.path.join(strdir, '%s_timer.json' % safe_name)
-        # Ensure per-molecule JSON contains a resolved user entry when available
+    """Save only the current active molecule to its own local _timer.json."""
+    if self.current_molecule and self.current_molecule != "No structure loaded":
+      mol_name = self.current_molecule
+      mol_data = self.molecule_timings.get(mol_name)
+      if mol_data:
         try:
-          if not mol_data.get('user') or not mol_data.get('user', {}).get('displayname'):
-            # Prefer to populate from current molecule context
-            if mol_name == self.current_molecule:
+          strdir = mol_data.get('sNumPath') or OV.StrDir()
+          if not strdir:
+            strdir = instance_path
+          safe_name = self._sanitize_for_filename(mol_name)
+          fn = os.path.join(strdir, '%s_timer.json' % safe_name)
+          # Ensure per-molecule JSON contains a resolved user entry when available
+          try:
+            if not mol_data.get('user') or not mol_data.get('user', {}).get('displayname'):
               try:
                 ui = self._get_user_info()
                 if ui and (ui.get('displayname') or ui.get('id')):
                   mol_data['user'] = ui
               except Exception:
                 pass
-        except Exception:
-          pass
-        # Write per-molecule file atomically to avoid partial/truncated files
-        try:
-          tmp_fn = fn + '.tmp'
-          with open(tmp_fn, 'w', encoding='utf-8') as f:
-            json.dump(mol_data, f, indent=2, ensure_ascii=False, default=str)
-          try:
-            os.replace(tmp_fn, fn)
           except Exception:
+            pass
+          # Write per-molecule file atomically to avoid partial/truncated files
+          try:
+            tmp_fn = fn + '.tmp'
+            with open(tmp_fn, 'w', encoding='utf-8') as f:
+              json.dump(mol_data, f, indent=2, ensure_ascii=False, default=str)
             try:
-              os.remove(fn)
+              os.replace(tmp_fn, fn)
             except Exception:
-              pass
-            os.rename(tmp_fn, fn)
+              try:
+                os.remove(fn)
+              except Exception:
+                pass
+              os.rename(tmp_fn, fn)
+          except Exception as e:
+            print("Error saving local timing data for %s: %s" % (mol_name, str(e)))
         except Exception as e:
           print("Error saving local timing data for %s: %s" % (mol_name, str(e)))
-      except Exception as e:
-        print("Error saving local timing data for %s: %s" % (mol_name, str(e)))
-
-
-
 
   # ------------------------------------------------------------------
   # Auto-start helpers
   # ------------------------------------------------------------------
 
   def _register_file_listener(self):
-    """Register onto olx.FileChangeListeners so the timer auto-starts
-    whenever a structure is opened in Olex2."""
-    try:
-      if not hasattr(olx, 'FileChangeListeners'):
-        olx.FileChangeListeners = []
-      if self._on_file_changed not in olx.FileChangeListeners:
-        olx.FileChangeListeners.append(self._on_file_changed)
-    except Exception as e:
-      pass
-
-  def _on_file_changed(self, filetype):
     """Called automatically by Olex2 whenever a structure is opened."""
     try:
       self._mark_activity()
