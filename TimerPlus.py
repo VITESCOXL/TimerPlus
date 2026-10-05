@@ -252,69 +252,101 @@ class TimerPlus(PT):
     except Exception:
       return 'unnamed'
   
-  def save_timing_data(self):
-    """Save timing history to JSON file"""
-    # Write atomically to avoid truncating the existing history file
-    try:
-      tmp_fn = self.timing_data_file + '.tmp'
-      with open(tmp_fn, 'w', encoding='utf-8') as f:
-        json.dump(self.molecule_timings, f, indent=2, ensure_ascii=False, default=str)
-      try:
-        os.replace(tmp_fn, self.timing_data_file)
-      except Exception:
-        # Fallback to rename if replace not available
-        try:
-          os.remove(self.timing_data_file)
-        except Exception:
-          pass
-        os.rename(tmp_fn, self.timing_data_file)
-    except Exception as e:
-      print("Error saving timing data: %s" % str(e))
-      # Clean up temp file if present
-      try:
-        if os.path.exists(tmp_fn):
-          os.remove(tmp_fn)
-      except Exception:
-        pass
+  def save_timing_data(self, molecules=None):
+    """
+    Save the timing history.
 
-    """Save every tracked molecule to its own local _timer.json in its sNumPath directory."""
-    for mol_name, mol_data in list(self.molecule_timings.items()):
-      try:
-        strdir = mol_data.get('sNumPath') or OV.StrDir()
-        if not strdir:
-          strdir = instance_path
-        safe_name = self._sanitize_for_filename(mol_name)
-        fn = os.path.join(strdir, '%s_timer.json' % safe_name)
-        # Ensure per-molecule JSON contains a resolved user entry when available
+    The central history (DataDir()/TimerPlus_history.json) holds every
+    molecule; each molecule also has its own <name>_timer.json in its
+    structure folder (sNumPath). Only the per-molecule files of `molecules`
+    are written -- by default just the current molecule: the others have
+    not changed, and rewriting them all (137 molecules in 56 folders, every
+    10 s) changed the modified date of every one of those folders.
+    """
+    try:
+      if self.current_molecule in self.molecule_timings:
+        self._ensure_user_info(self.current_molecule, self.molecule_timings[self.current_molecule])
+    except Exception as e:
+      print("TimerPlus: could not resolve user info: %s" % e)
+
+    # Central history: atomic (temp file + rename) -- it lives in DataDir(),
+    # whose date doesn't matter -- and only when its content changed.
+    try:
+      text = json.dumps(self.molecule_timings, indent=2, ensure_ascii=False, default=str)
+      if text != getattr(self, '_last_history_text', None):
+        tmp_fn = self.timing_data_file + '.tmp'
         try:
-          if not mol_data.get('user') or not mol_data.get('user', {}).get('displayname'):
-            # Prefer to populate from current molecule context
-            if mol_name == self.current_molecule:
-              try:
-                ui = self._get_user_info()
-                if ui and (ui.get('displayname') or ui.get('id')):
-                  mol_data['user'] = ui
-              except Exception:
-                pass
-        except Exception:
-          pass
-        # Write per-molecule file atomically to avoid partial/truncated files
-        try:
-          tmp_fn = fn + '.tmp'
           with open(tmp_fn, 'w', encoding='utf-8') as f:
-            json.dump(mol_data, f, indent=2, ensure_ascii=False, default=str)
+            f.write(text)
           try:
-            os.replace(tmp_fn, fn)
+            os.replace(tmp_fn, self.timing_data_file)
           except Exception:
+            # Fallback to rename if replace not available
             try:
-              os.remove(fn)
+              os.remove(self.timing_data_file)
             except Exception:
               pass
-            os.rename(tmp_fn, fn)
+            os.rename(tmp_fn, self.timing_data_file)
+          self._last_history_text = text
         except Exception as e:
-          print("Error saving local timing data for %s: %s" % (mol_name, str(e)))
+          print("Error saving timing data: %s" % str(e))
+          try:
+            if os.path.exists(tmp_fn):
+              os.remove(tmp_fn)
+          except Exception:
+            pass
+    except Exception as e:
+      print("Error saving timing data: %s" % str(e))
+
+    if molecules is None:
+      molecules = [self.current_molecule]
+    for mol_name in molecules:
+      mol_data = self.molecule_timings.get(mol_name)
+      if mol_data is None:
+        continue
+      try:
+        self._write_molecule_file(mol_name, mol_data)
       except Exception as e:
         print("Error saving local timing data for %s: %s" % (mol_name, str(e)))
+
+  def _ensure_user_info(self, mol_name, mol_data):
+    """Fill in the user of the current molecule if it is still missing."""
+    if mol_data.get('user') and mol_data.get('user', {}).get('displayname'):
+      return
+    if mol_name != self.current_molecule:
+      return
+    ui = self._get_user_info()
+    if ui and (ui.get('displayname') or ui.get('id')):
+      mol_data['user'] = ui
+
+  def _write_molecule_file(self, mol_name, mol_data):
+    """
+    Write <name>_timer.json in the molecule's structure folder -- only if
+    its content changed, and in place. A folder's modified date changes
+    when a file in it is created, deleted or renamed, not when an existing
+    file is rewritten; the former temp-file-and-rename write changed the
+    structure folder's date on every save. Only the very first write of a
+    molecule's file (a new file) still changes it, once.
+    """
+    strdir = mol_data.get('sNumPath') or OV.StrDir()
+    if not strdir:
+      strdir = instance_path
+    fn = os.path.join(strdir, '%s_timer.json' % self._sanitize_for_filename(mol_name))
+    text = json.dumps(mol_data, indent=2, ensure_ascii=False, default=str)
+    written = self.__dict__.setdefault('_written_molecule_files', {})
+    if written.get(fn) == text:
+      return
+    if os.path.exists(fn):
+      try:
+        with open(fn, 'r', encoding='utf-8') as f:
+          if f.read() == text:
+            written[fn] = text
+            return
+      except Exception as e:
+        print("TimerPlus: could not read %s: %s" % (fn, e))
+    with open(fn, 'w', encoding='utf-8') as f:
+      f.write(text)
+    written[fn] = text
 
 
 
@@ -945,7 +977,7 @@ class TimerPlus(PT):
       self.molecule_timings[mol]['total_idle_time'] = max(0.0, old_stored_idle - parsed)
       print('TimerPlus: corrected idle by -%.3fs (refine duration)' % parsed)
       try:
-        self.save_timing_data()
+        self.save_timing_data([mol])
       except Exception as e:
         print('TimerPlus: saving timing data failed:', e)
       # Save the wall-clock duration separately so work deduction stays correct,
@@ -1685,7 +1717,7 @@ class TimerPlus(PT):
           run_secs = work_secs + refine_secs + idle_secs
         rec['total_run_time'] = run_secs
         rec['last_updated'] = datetime.now().isoformat()
-      self.save_timing_data()
+      self.save_timing_data([mol])
       try:
         olx.html.Update()
       except Exception:
