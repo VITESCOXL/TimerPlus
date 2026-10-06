@@ -1,0 +1,73 @@
+<!-- TimerPlus history edit popup -->
+<html>
+  <head>
+    <title>TimerPlus - Edit Timing</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <style>
+      body { font-family: Arial, sans-serif; font-size: 12px; margin: 8px; }
+      table { border-collapse: collapse; width: 100%; }
+      td, th { padding: 6px; }
+    </style>
+  </head>
+  <body>
+    <h3>Edit Timing</h3>
+    <!-- Molecule (readonly) -->
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_MOL",
+    "value=GetVar('TIMER_MOL')",
+    "manage=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <!-- Work time input -->
+    <div><b>Work Time</b></div>
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_WORK",
+    "value=GetVar('TIMER_WORK')",
+    "manage=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <div><b>Refine Time</b></div>
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_REFINE",
+    "value=GetVar('TIMER_REFINE')",
+    "manage=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <div><b>Idle Time</b></div>
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_IDLE",
+    "value=GetVar('TIMER_IDLE')",
+    "manage=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <div><b>Run Time</b></div>
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_RUN",
+    "value=GetVar('TIMER_RUN')",
+    "manage=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <!-- Save/Close -->
+    $+
+    html.Snippet(GetVar(default_link),
+    "value=Save",
+    "onclick=spy.TimerPlus.update_history_from_popup()",
+    )$-
+    &nbsp;&nbsp;
+    $+
+    html.Snippet(GetVar(default_link),
+    "value=Close",
+    "onclick=close",
+    )$-
+  </body>
+</html>
