@@ -1,5 +1,5 @@
 
   p_name = TimerPlus
   p_htm = TimerPlus
-  p_img = [(p_name,'h1'), ("TimerPlus-Extras",'h3')]
+  p_img = [("TimerPlus",'h1'), ("TimerPlus-Extras",'h3')]
   p_scope = TimerPlus

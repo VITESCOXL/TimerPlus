@@ -1571,34 +1571,34 @@ class TimerPlus(PT):
     """Open a popup window showing the full timing history."""
     try:
       # Popup a simple HTML page bundled with the plugin that displays the history
-      wFilePath = os.path.join(self.p_path, 'timerplus_history.htm')
+      wFilePath = os.path.join(self.p_path, 'TimerPlus_history.htm')
       width, height, left, right, top = self._get_history_popup_layout()
       # Use a named popup so multiple calls reuse the same window
       try:
-        olx.Popup('timerplus_history', wFilePath, b="tcr", t="TimerPlus History", w=width, h=height, x=left, y=top)
+        olx.Popup('TimerPlus_history', wFilePath, b="tcr", t="TimerPlus History", w=width, h=height, x=left, y=top)
       except Exception:
         # Fallback to simple popup call without extra args
-        olx.Popup('timerplus_history', wFilePath)
+        olx.Popup('TimerPlus_history', wFilePath)
     except Exception as e:
       print("TimerPlus: could not open history popup: %s" % str(e))
 
   def show_search_results(self):
     """Open or refresh the separate search-results popup."""
-    wFilePath = os.path.join(self.p_path, 'timerplus_search_results.htm')
+    wFilePath = os.path.join(self.p_path, 'TimerPlus_search_results.htm')
     width, height, left, right, top = self._get_history_popup_layout()
     try:
-      olx.Popup('timerplus_search_results', wFilePath, b="tcr", t="TimerPlus Search Results", w=width, h=height, x=right, y=top)
+      olx.Popup('TimerPlus_search_results', wFilePath, b="tcr", t="TimerPlus Search Results", w=width, h=height, x=right, y=top)
     except Exception:
-      olx.Popup('timerplus_search_results', wFilePath)
+      olx.Popup('TimerPlus_search_results', wFilePath)
 
   def edit_history(self):
     """Open the edit form popup for timing history."""
     try:
-      wFilePath = os.path.join(self.p_path, 'timerplus_history_edit.htm')
+      wFilePath = os.path.join(self.p_path, 'TimerPlus_history_edit.htm')
       try:
-        olx.Popup('timerplus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=600, h=360)
+        olx.Popup('TimerPlus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=600, h=360)
       except Exception:
-        olx.Popup('timerplus_history_edit', wFilePath)
+        olx.Popup('TimerPlus_history_edit', wFilePath)
     except Exception as e:
       print("TimerPlus: could not open edit history popup: %s" % str(e))
 
@@ -1640,16 +1640,16 @@ class TimerPlus(PT):
           pass
       except Exception:
         pass
-      wFilePath = os.path.join(self.p_path, 'timerplus_history_edit.htm')
+      wFilePath = os.path.join(self.p_path, 'TimerPlus_history_edit.htm')
       try:
-        olx.Popup('timerplus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=600, h=360)
+        olx.Popup('TimerPlus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=600, h=360)
       except Exception:
-        olx.Popup('timerplus_history_edit', wFilePath)
+        olx.Popup('TimerPlus_history_edit', wFilePath)
       # Ensure the fields are set after popup is created
       try:
         # Set the molecule display and the work time (try both qualified and bare names)
         try:
-          olx.html.SetValue('timerplus_history_edit.EDIT_MOL', name)
+          olx.html.SetValue('TimerPlus_history_edit.EDIT_MOL', name)
         except Exception:
           pass
         try:
@@ -1676,7 +1676,7 @@ class TimerPlus(PT):
     try:
       name = str(mol_name)
       try:
-        olx.html.SetValue('timerplus_history_edit.EDIT_MOL', name)
+        olx.html.SetValue('TimerPlus_history_edit.EDIT_MOL', name)
       except Exception:
         pass
       try:
@@ -1698,6 +1698,11 @@ class TimerPlus(PT):
     """Format seconds using the configured display resolution."""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
+    if seconds%60 >= 30:
+      minutes += 1
+      if minutes >= 60:
+        hours += 1
+        minutes = 0
     try:
       resolution = str(OV.GetParam('TimerPlus.time_resolution', 'second')).lower()
     except Exception:
@@ -1740,7 +1745,9 @@ class TimerPlus(PT):
   def _find_wfnlog_for_molecule(self, mol_name, data=None):
     """Resolve best .wfnlog path for a molecule entry."""
     try:
-      rec = data or self.molecule_timings.get(mol_name, {}) or {}
+      rec = dict(self.molecule_timings.get(mol_name, {}) or {})
+      if data:
+        rec.update(data)
       base_name = str(rec.get('base_sNum') or mol_name or '').strip()
       # Remove optional user suffix: "name [User]" -> "name"
       if base_name.endswith(']') and ' [' in base_name:
@@ -1935,7 +1942,7 @@ class TimerPlus(PT):
     try:
       # Try reading both qualified and bare control names for robustness
       mol_name = None
-      for n in ('timerplus_history_edit.EDIT_MOL', 'EDIT_MOL'):
+      for n in ('TimerPlus_history_edit.EDIT_MOL', 'EDIT_MOL'):
         try:
           v = olx.html.GetValue(n)
           if v:
@@ -1951,7 +1958,7 @@ class TimerPlus(PT):
         except Exception:
           pass
       work = None
-      for n in ('timerplus_history_edit.EDIT_WORK', 'EDIT_WORK'):
+      for n in ('TimerPlus_history_edit.EDIT_WORK', 'EDIT_WORK'):
         try:
           v = olx.html.GetValue(n)
           if v is not None:
@@ -1967,7 +1974,7 @@ class TimerPlus(PT):
         except Exception:
           pass
       refine = None
-      for n in ('timerplus_history_edit.EDIT_REFINE', 'EDIT_REFINE'):
+      for n in ('TimerPlus_history_edit.EDIT_REFINE', 'EDIT_REFINE'):
         try:
           v = olx.html.GetValue(n)
           if v is not None:
@@ -1984,7 +1991,7 @@ class TimerPlus(PT):
           pass
 
       idle = None
-      for n in ('timerplus_history_edit.EDIT_IDLE', 'EDIT_IDLE'):
+      for n in ('TimerPlus_history_edit.EDIT_IDLE', 'EDIT_IDLE'):
         try:
           v = olx.html.GetValue(n)
           if v is not None:
@@ -2001,7 +2008,7 @@ class TimerPlus(PT):
           pass
 
       run = None
-      for n in ('timerplus_history_edit.EDIT_RUN', 'EDIT_RUN'):
+      for n in ('TimerPlus_history_edit.EDIT_RUN', 'EDIT_RUN'):
         try:
           v = olx.html.GetValue(n)
           if v is not None:
@@ -2098,7 +2105,7 @@ class TimerPlus(PT):
       if search_term:
         search_val = str(search_term).strip().lower()
       else:
-        for control_name in ('timerplus_history.TIMER_SEARCH', 'TIMER_SEARCH'):
+        for control_name in ('TimerPlus_history.TIMER_SEARCH', 'TIMER_SEARCH'):
           try:
             val = olx.html.GetValue(control_name)
             if val is not None:
@@ -2123,7 +2130,7 @@ class TimerPlus(PT):
     """Clear the history filter and show all structures."""
     try:
       self._history_search_term = ""
-      for control_name in ('timerplus_history.TIMER_SEARCH', 'TIMER_SEARCH'):
+      for control_name in ('TimerPlus_history.TIMER_SEARCH', 'TIMER_SEARCH'):
         try:
           olx.html.SetValue(control_name, "")
         except Exception:
@@ -2400,7 +2407,7 @@ class TimerPlus(PT):
       run_val = self._format_time(float(rec.get('total_run_time', 0.0) or 0.0))
       try:
         try:
-          olx.html.SetValue('timerplus_history_edit.EDIT_WORK', work_val)
+          olx.html.SetValue('TimerPlus_history_edit.EDIT_WORK', work_val)
         except Exception:
           pass
         try:
@@ -2408,7 +2415,7 @@ class TimerPlus(PT):
         except Exception:
           pass
         try:
-          olx.html.SetValue('timerplus_history_edit.EDIT_REFINE', refine_val)
+          olx.html.SetValue('TimerPlus_history_edit.EDIT_REFINE', refine_val)
         except Exception:
           pass
         try:
@@ -2416,7 +2423,7 @@ class TimerPlus(PT):
         except Exception:
           pass
         try:
-          olx.html.SetValue('timerplus_history_edit.EDIT_IDLE', idle_val)
+          olx.html.SetValue('TimerPlus_history_edit.EDIT_IDLE', idle_val)
         except Exception:
           pass
         try:
@@ -2424,7 +2431,7 @@ class TimerPlus(PT):
         except Exception:
           pass
         try:
-          olx.html.SetValue('timerplus_history_edit.EDIT_RUN', run_val)
+          olx.html.SetValue('TimerPlus_history_edit.EDIT_RUN', run_val)
         except Exception:
           pass
         try:

@@ -1,0 +1,75 @@
+
+<!-- TimerPlus history popup -->
+<html>
+  <head>
+    <title>TimerPlus - History</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <style>
+      body { font-family: Arial, sans-serif; font-size: 12px; margin: 8px; }
+      h2 { color: #2c3e50; margin-bottom: 10px; border-bottom: 2px solid #3498db; padding-bottom: 5px; }
+      .search-box { margin-bottom: 15px; padding: 10px; background-color: #e8f4f8; border: 2px solid #3498db; border-radius: 3px; }
+      .search-box b { color: #2c3e50; }
+      .search-hint { font-size: 11px; color: #666; margin-top: 8px; }
+      .status-msg { font-size: 11px; color: #0066cc; margin-top: 8px; font-weight: bold; }
+      table { border-collapse: collapse; width: 100%; background-color: #f9f9f9; }
+      td, th { border: 1px solid #bdc3c7; padding: 8px; }
+      th { background-color: #34495e; color: white; text-align: center; font-weight: bold; }
+      th:first-child { text-align: left; }
+      tr:nth-child(even) td { background-color: #ffffff; }
+      tr:hover td { background-color: #e8f4f8; }
+      .current-mol { background-color: #d5eef7 !important; }
+    </style>
+  </head>
+  <body>
+    <h2>⏱ TimerPlus - Complete Timing History</h2>
+    <p><small>All structures in chronological order. Active structure is highlighted in blue.</small></p>
+
+    <!-- Search Section with Olex2 Native Components -->
+    <div class="search-box">
+      <b>🔍 Search by structure name:</b><br><br>
+      
+      $+
+      html.Snippet("gui/snippets/input-text-td",
+      "name=TIMER_SEARCH",
+      "value=GetVar('TIMER_SEARCH')",
+      "manage=true",
+      "td1=<td width='100%'>"
+      )$-
+      $+
+      html.Snippet("gui/snippets/input-button",
+      "name=TIMER_SEARCH_BUTTON",
+      "value=Search",
+      "width=80",
+      "onclick=spy.TimerPlus.filter_history_display()",
+      )$-
+      &nbsp;&nbsp;
+      $+
+      html.Snippet("gui/snippets/input-button",
+      "name=TIMER_CLEAR_BUTTON",
+      "value=Clear",
+      "width=80",
+      "onclick=spy.TimerPlus.clear_history_filter()",
+      )$-
+      
+      <div class="search-hint">
+        💡 Type a structure name and click Search to filter results. Click Clear to show all.
+      </div>
+    </div>
+
+    <!-- ALL STRUCTURES TABLE -->
+    <h3 style="margin-top: 20px; color: #2c3e50;">All Structures</h3>
+    <table>
+      <tr>
+        <th>Molecule Name</th>
+        <th>Work Time</th>
+        <th>Refine Time</th>
+        <th>Idle Time</th>
+        <th>Wave Function</th>
+        <th>Last Updated</th>
+        <th>Edit</th>
+      </tr>
+      $spy.TimerPlus.get_timing_history_popup()
+    </table>
+
+  </body>
+</html>
