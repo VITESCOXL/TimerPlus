@@ -10,6 +10,7 @@ import time
 import json
 import uuid
 import re
+import html as html_lib
 from datetime import datetime
 try:
   from RunPrg import RunRefinementPrg, LM
@@ -58,6 +59,7 @@ class TimerPlus(PT):
     self.timing_data_file = os.path.join(instance_path, 'TimerPlus_history.json')
     self.molecule_timings = self.load_timing_data()
     self._history_search_term = ""  # For filtering in history popup
+    self._history_modal_open = False
     self.current_molecule = None
     self.current_start_time = None
     self.current_idle_start = None
@@ -129,8 +131,8 @@ class TimerPlus(PT):
 
     # Patch multiple datasets removed (was optional UI badge)
 
-    # Start recurring display refresh based on phil refresh_interval
-    self._start_refresh_timer()
+    # Start recurring display refresh based on phil refresh_interval (Currently inactive)
+    # self._start_refresh_timer()
 
   # _patch_multiple_dataset removed — optional GUI badge feature disabled
 
@@ -430,6 +432,7 @@ class TimerPlus(PT):
       # Advance the idle clock baseline so the refine period is not counted as idle
       self._idle_last_update = time.time()
       self._mark_activity()
+      olx.Schedule(3, "spy.TimerPlus.refresh_display()")  # Update display immediately after refine ends
       # After a refine ends, attempt to parse NoSpher output.
       # Schedule a retry 4 s later so the file has time to be fully written.
       try:
@@ -460,18 +463,18 @@ class TimerPlus(PT):
     except Exception:
       pass
 
-  def _start_refresh_timer(self):
-    """Schedule recurring display refresh using olx.Schedule"""
-    try:
-      interval = int(OV.GetParam('TimerPlus.refresh_interval', 3))
-    except Exception:
-      interval = 3
-    if interval <= 0:
-      self._stop_refresh_timer()
-      return
-    self._refresh_interval = interval
-    self._refresh_active = True
-    olx.Schedule(interval, "spy.TimerPlus._tick()")
+  # def _start_refresh_timer(self):
+  #   """Schedule recurring display refresh using olx.Schedule. CURRENTLY INACTIVE"""
+  #   try:
+  #     interval = int(OV.GetParam('TimerPlus.refresh_interval', 30))
+  #   except Exception:
+  #     interval = 30
+  #   if interval <= 0:
+  #     self._stop_refresh_timer()
+  #     return
+  #   self._refresh_interval = interval
+  #   self._refresh_active = True
+  #   olx.Schedule(interval, "spy.TimerPlus._tick()")
 
   def _tick(self):
     """Called by olx.Schedule"""
@@ -489,8 +492,8 @@ class TimerPlus(PT):
         pass
     except Exception:
       pass
-    if self._refresh_active and self._refresh_interval and self._refresh_interval > 0:
-      olx.Schedule(self._refresh_interval, "spy.TimerPlus._tick()")
+    # if self._refresh_active and self._refresh_interval and self._refresh_interval > 0:
+    #   olx.Schedule(self._refresh_interval, "spy.TimerPlus._tick()")
 
   _work_note_re = re.compile(r'(?:\s*\|\s*)?Work: (?:\d+(?::\d+)+|(?:\d+h)?(?:\d+min)?(?:\d+s)?)')
 
@@ -1392,6 +1395,15 @@ class TimerPlus(PT):
     n_tail = max_len // 3
     return name[:max_len - n_tail - 3] + '...' + name[-n_tail:]
 
+  def _molecule_name_link(self, mol_name):
+    """Render a molecule name as a link matching the TimerPlus Extras view."""
+    safe_name = str(mol_name).replace("\\", "\\\\").replace("'", "\\'")
+    safe_name = safe_name.replace("\r", "\\r").replace("\n", "\\n")
+    href = html_lib.escape(
+      "spy.TimerPlus.open_molecule('%s')" % safe_name, quote=True)
+    display_name = html_lib.escape(self._short_name(mol_name))
+    return "<a href=\"%s\"><b>%s</b></a>" % (href, display_name)
+
   def _short_date(self, updated):
     """'2026-10-05 16:11:17' -> 'Mon 5th Oct, 16:11'; the year is added
     when it is not the current one. Other strings (e.g. 'Active Now') are
@@ -1538,10 +1550,11 @@ class TimerPlus(PT):
       
       # Escape single quotes for JS call
       safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
+      name_link = self._molecule_name_link(mol_name)
       edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
       html_rows.append(
         "<tr style='background-color: %s;'>" % bg_color +
-        "<td width='18%%' style='padding:6px;'><b>%s</b></td>" % mol_name +
+        "<td width='18%%' style='padding:6px;'>%s</td>" % name_link +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
@@ -1579,6 +1592,12 @@ class TimerPlus(PT):
       except Exception:
         # Fallback to simple popup call without extra args
         olx.Popup('TimerPlus_history', wFilePath)
+      if not self._history_modal_open:
+        self._history_modal_open = True
+        try:
+          OV.ShowModal('TimerPlus_history')
+        finally:
+          self._history_modal_open = False
     except Exception as e:
       print("TimerPlus: could not open history popup: %s" % str(e))
 
@@ -1590,6 +1609,7 @@ class TimerPlus(PT):
       olx.Popup('TimerPlus_search_results', wFilePath, b="tcr", t="TimerPlus Search Results", w=width, h=height, x=right, y=top)
     except Exception:
       olx.Popup('TimerPlus_search_results', wFilePath)
+    OV.ShowModal('TimerPlus_search_results')
 
   def edit_history(self):
     """Open the edit form popup for timing history."""
@@ -1599,6 +1619,7 @@ class TimerPlus(PT):
         olx.Popup('TimerPlus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=600, h=360)
       except Exception:
         olx.Popup('TimerPlus_history_edit', wFilePath)
+      OV.ShowModal('TimerPlus_history_edit')
     except Exception as e:
       print("TimerPlus: could not open edit history popup: %s" % str(e))
 
@@ -1668,6 +1689,7 @@ class TimerPlus(PT):
           pass
       except Exception:
         pass
+      OV.ShowModal('TimerPlus_history_edit')
     except Exception as e:
       print("TimerPlus: could not open edit history popup: %s" % str(e))
 
@@ -2265,10 +2287,11 @@ class TimerPlus(PT):
       
       # Escape single quotes for JS call
       safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
+      name_link = self._molecule_name_link(mol_name)
       edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
       html_rows.append(
         "<tr style='background-color: %s;'>" % bg_color +
-        "<td width='18%%' style='padding:6px;'><b>%s</b></td>" % mol_name +
+        "<td width='18%%' style='padding:6px;'>%s</td>" % name_link +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
@@ -2377,9 +2400,10 @@ class TimerPlus(PT):
         # Escape single quotes for JS call
         safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
         edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+        name_link = self._molecule_name_link(mol_name)
         html += (
           "<tr style='background-color: %s; border: 1px solid #bdc3c7;'>" % bg_color +
-          "<td style='padding: 8px; width: 18%%;'><b>%s</b></td>" % mol_name +
+          "<td style='padding: 8px; width: 18%%;'>%s</td>" % name_link +
           "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % work_str +
           "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % refine_str +
           "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % idle_str +

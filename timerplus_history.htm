@@ -23,16 +23,18 @@
   <body>
     <h2>⏱ TimerPlus - Complete Timing History</h2>
     <p><small>All structures in chronological order. Active structure is highlighted in blue.</small></p>
+    <!--<p><input type="button" value="Close" onclick="html.EndModal('TimerPlus_history', 0)" /></p>-->  
 
     <!-- Search Section with Olex2 Native Components -->
     <div class="search-box">
-      <b>🔍 Search by structure name:</b><br><br>
+      <b> Search by structure name:</b><br><br>
       
       $+
       html.Snippet("gui/snippets/input-text-td",
       "name=TIMER_SEARCH",
       "value=GetVar('TIMER_SEARCH')",
       "manage=true",
+      "onreturn=spy.TimerPlus.filter_history_display()",
       "td1=<td width='100%'>"
       )$-
       $+
@@ -43,16 +45,9 @@
       "onclick=spy.TimerPlus.filter_history_display()",
       )$-
       &nbsp;&nbsp;
-      $+
-      html.Snippet("gui/snippets/input-button",
-      "name=TIMER_CLEAR_BUTTON",
-      "value=Clear",
-      "width=80",
-      "onclick=spy.TimerPlus.clear_history_filter()",
-      )$-
       
       <div class="search-hint">
-        💡 Type a structure name and click Search to filter results. Click Clear to show all.
+         Type a structure name and click Search to filter results. Click Clear to show all.
       </div>
     </div>
 
