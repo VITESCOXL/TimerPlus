@@ -1,0 +1,93 @@
+<!-- TimerPlus history edit popup -->
+<html>
+  <head>
+    <title>TimerPlus - Edit Timing</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <style>
+      body { font-family: Arial, sans-serif; font-size: 12px; margin: 8px; }
+      table { border-collapse: collapse; width: 100%; }
+      td, th { padding: 6px; }
+    </style>
+  </head>
+  <body>
+    <h3>Edit Timing</h3>
+    <div><b>Comment</b></div>
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_COMMENT",
+    "value=GetVar('TIMER_COMMENT')",
+    "manage=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    $+
+    html.Snippet("gui/snippets/input-checkbox",
+    "name=EDIT_TIMING_EDIT",
+    "label=Edit molecule name and timing values",
+    "checked=false",
+    "onclick=spy.TimerPlus.set_timing_edit_enabled(html.GetState('~name~'))"
+    )$-
+    <p style="color:#a04000; margin-top:4px;">
+      Checking this box lets you overwrite the molecule name and recorded timing values.
+    </p>
+
+    <!-- Molecule name -->
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_MOL",
+    "value=GetVar('TIMER_MOL')",
+    "manage=true",
+    "disabled=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <!-- Work time input -->
+    <div><b>Work Time</b></div>
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_WORK",
+    "value=GetVar('TIMER_WORK')",
+    "manage=true",
+    "disabled=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <div><b>Refine Time</b></div>
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_REFINE",
+    "value=GetVar('TIMER_REFINE')",
+    "manage=true",
+    "disabled=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <div><b>Idle Time</b></div>
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_IDLE",
+    "value=GetVar('TIMER_IDLE')",
+    "manage=true",
+    "disabled=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <div><b>Run Time</b></div>
+    $+
+    html.Snippet("gui/snippets/input-text-td",
+    "name=EDIT_RUN",
+    "value=GetVar('TIMER_RUN')",
+    "manage=true",
+    "disabled=true",
+    "td1=<td width='100%'>"
+    )$-
+
+    <!-- Save/Close -->
+    $+
+    html.Snippet(GetVar(default_link),
+    "value=Save",
+    "onclick=spy.TimerPlus.update_history_from_popup()",
+    )$-
+    <!--<input type="button" value="Close" onclick="html.EndModal('TimerPlus_history_edit', 0)" />-->
+  </body>
+</html>

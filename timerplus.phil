@@ -8,17 +8,4 @@ TimerPlus{
       .type = str
       .help = The tool before which the TimerPlus GUI shall appear.
     }
-  refresh_interval = 3
-    .type = int
-    .help = Interval in seconds between automatic display refreshes (0 to disable).
-  idle_grace = 60
-    .type = float
-    .help = Seconds without mouse movement in the Olex2 window before time counts as idle.
-  notify_work_time = True
-    .type = bool
-    .help = Show the current structure's total work time in the notification bar at the top of the screen.
-  time_resolution = *minute second
-    .type = choice
-    .expert_level = 1
-    .help = Choose between HH:MM:SS and HH:MM timer displays.
 }
