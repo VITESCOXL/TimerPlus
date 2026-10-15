@@ -60,6 +60,7 @@ class TimerPlus(PT):
     self.molecule_timings = self.load_timing_data()
     self._history_search_term = ""  # For filtering in history popup
     self._history_modal_open = False
+    self._history_child_requires_restore = False
     self.current_molecule = None
     self.current_start_time = None
     self.current_idle_start = None
@@ -105,9 +106,15 @@ class TimerPlus(PT):
     OV.registerFunction(self.update_history, True, self.p_name)
     OV.registerFunction(self.edit_history_for, True, self.p_name)
     OV.registerFunction(self.update_history_from_popup, True, self.p_name)
+    OV.registerFunction(self.set_timing_edit_enabled, True, self.p_name)
     OV.registerFunction(self.set_edit_work, True, self.p_name)
     OV.registerFunction(self._prefill_edit_popup, True, self.p_name)
     OV.registerFunction(self.open_molecule, True, self.p_name)
+    OV.registerFunction(self.open_molecule_from_history, True, self.p_name)
+    OV.registerFunction(self.open_molecule_from_search_results, True, self.p_name)
+    OV.registerFunction(self._open_molecule_after_search_results, True, self.p_name)
+    OV.registerFunction(self._show_search_results_after_history, True, self.p_name)
+    OV.registerFunction(self._show_edit_after_history, True, self.p_name)
     if not from_outside:
       self.setup_gui()
     # END Generated =======================================
@@ -125,7 +132,7 @@ class TimerPlus(PT):
     self.check_and_switch_molecule()
 
     # Initialise display variables so the HTML panel never shows missing-var errors
-    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN', 'TIMER_WFN', 'TIMER_USER'):
+    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN', 'TIMER_WFN', 'TIMER_USER', 'TIMER_COMMENT'):
       OV.SetVar(_var, '')
     self.update_timer_vars()
 
@@ -388,6 +395,7 @@ class TimerPlus(PT):
     try:
       self._mark_activity()
       self.check_and_switch_molecule()
+      self.update_timer_vars(push_controls=True)
       try:
         olx.html.Update()
       except:
@@ -1395,12 +1403,18 @@ class TimerPlus(PT):
     n_tail = max_len // 3
     return name[:max_len - n_tail - 3] + '...' + name[-n_tail:]
 
-  def _molecule_name_link(self, mol_name):
-    """Render a molecule name as a link matching the TimerPlus Extras view."""
+  def _molecule_name_link(self, mol_name, close_history=False, close_search=False):
+    """Render a molecule name link, optionally closing its history popup."""
     safe_name = str(mol_name).replace("\\", "\\\\").replace("'", "\\'")
     safe_name = safe_name.replace("\r", "\\r").replace("\n", "\\n")
+    if close_search:
+      opener = 'open_molecule_from_search_results'
+    elif close_history:
+      opener = 'open_molecule_from_history'
+    else:
+      opener = 'open_molecule'
     href = html_lib.escape(
-      "spy.TimerPlus.open_molecule('%s')" % safe_name, quote=True)
+      "spy.TimerPlus.%s('%s')" % (opener, safe_name), quote=True)
     display_name = html_lib.escape(self._short_name(mol_name))
     return "<a href=\"%s\"><b>%s</b></a>" % (href, display_name)
 
@@ -1449,6 +1463,26 @@ class TimerPlus(PT):
           return
     print("TimerPlus: no %s.res/.ins/.cif in %s -- opening the folder" % (sNum, folder))
     olex.m('shell "%s"' % folder)
+
+  def open_molecule_from_history(self, mol_name):
+    """Close the History popup before opening the selected molecule."""
+    if OV.IsPopup('TimerPlus_history'):
+      OV.EndModal('TimerPlus_history', 0)
+    self.open_molecule(mol_name)
+
+  def open_molecule_from_search_results(self, mol_name):
+    """Close search results, then defer closing History and opening the molecule."""
+    if OV.IsPopup('TimerPlus_search_results'):
+      OV.EndModal('TimerPlus_search_results', 0)
+    safe_name = str(mol_name).replace("\\", "\\\\").replace("'", "\\'")
+    safe_name = safe_name.replace("\r", "\\r").replace("\n", "\\n")
+    olx.Schedule(1, "spy.TimerPlus._open_molecule_after_search_results('%s')" % safe_name)
+
+  def _open_molecule_after_search_results(self, mol_name):
+    """Close History and open the selected molecule after the search modal exits."""
+    if OV.IsPopup('TimerPlus_history'):
+      OV.EndModal('TimerPlus_history', 0)
+    self.open_molecule(mol_name)
 
   def get_timing_history_popup(self):
     """Get formatted HTML table of ALL timing history for popup (no 5-item limit)"""
@@ -1499,6 +1533,7 @@ class TimerPlus(PT):
         'refine': data.get('total_refine_time', 0.0),
         'idle': data.get('total_idle_time', 0.0),
         'total': data.get('total_run_time', 0.0),
+        'comment': data.get('comment', ''),
         'updated': updated,
         'is_current': False
       }
@@ -1522,12 +1557,13 @@ class TimerPlus(PT):
           'refine': current_session_refine,
           'idle': current_idle,
           'total': current_total,
+          'comment': '',
           'updated': "Active Now",
           'is_current': True
         }
     
     if not molecules_to_show:
-      return "<tr><td colspan='7' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
+      return "<tr><td colspan='8' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
     
     html_rows = []
     # Sort by current first, then by last updated
@@ -1550,17 +1586,19 @@ class TimerPlus(PT):
       
       # Escape single quotes for JS call
       safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
-      name_link = self._molecule_name_link(mol_name)
+      name_link = self._molecule_name_link(mol_name, close_history=True)
       edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+      comment = html_lib.escape(str(data.get('comment') or ''))
       html_rows.append(
         "<tr style='background-color: %s;'>" % bg_color +
-        "<td width='18%%' style='padding:6px;'>%s</td>" % name_link +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
-        "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
-        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
-        "<td width='22%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
+        "<td width='16%%' style='padding:6px;'>%s</td>" % name_link +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
+        "<td width='20%%' style='padding:6px;'>%s</td>" % comment +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
         "</tr>"
       )
     
@@ -1571,14 +1609,28 @@ class TimerPlus(PT):
     try:
       window = [int(value) for value in olx.GetWindowSize().split(',')]
       origin_x, origin_y, area_width, area_height = window[:4]
-      popup_width = max(240, min(800, (area_width - 36) // 2))
-      popup_height = max(240, min(500, area_height - 80))
+      popup_width = max(1, min(800, (area_width - 36) // 2))
+      popup_height = max(1, min(500, area_height - 80))
       top = origin_y + 40
       left = origin_x + 12
       right = left + popup_width + 12
       return popup_width, popup_height, left, right, top
     except Exception:
       return 800, 500, None, None, None
+
+  def _get_edit_popup_layout(self):
+    """Return an edit popup layout centered within the Olex2 window."""
+    try:
+      origin_x, origin_y, area_width, area_height = [
+        int(value) for value in olx.GetWindowSize().split(',')
+      ][:4]
+      width = min(600, max(1, area_width - 24))
+      height = min(400, max(1, area_height - 48))
+      left = origin_x + (area_width - width) // 2
+      top = origin_y + (area_height - height) // 2
+      return width, height, left, top
+    except Exception:
+      return 600, 400, None, None
 
   def show_history(self):
     """Open a popup window showing the full timing history."""
@@ -1590,8 +1642,10 @@ class TimerPlus(PT):
       try:
         olx.Popup('TimerPlus_history', wFilePath, b="tcr", t="TimerPlus History", w=width, h=height, x=left, y=top)
       except Exception:
-        # Fallback to simple popup call without extra args
-        olx.Popup('TimerPlus_history', wFilePath)
+        if left is not None and top is not None:
+          olx.Popup('TimerPlus_history', wFilePath, x=left, y=top)
+        else:
+          olx.Popup('TimerPlus_history', wFilePath)
       if not self._history_modal_open:
         self._history_modal_open = True
         try:
@@ -1601,30 +1655,88 @@ class TimerPlus(PT):
     except Exception as e:
       print("TimerPlus: could not open history popup: %s" % str(e))
 
-  def show_search_results(self):
+  def show_search_results(self, restore_history=False):
     """Open or refresh the separate search-results popup."""
+    if self._history_modal_open and not restore_history:
+      if OV.IsPopup('TimerPlus_history'):
+        OV.EndModal('TimerPlus_history', 0)
+      olx.Schedule(1, "spy.TimerPlus._show_search_results_after_history()")
+      return
+
     wFilePath = os.path.join(self.p_path, 'TimerPlus_search_results.htm')
     width, height, left, right, top = self._get_history_popup_layout()
     try:
       olx.Popup('TimerPlus_search_results', wFilePath, b="tcr", t="TimerPlus Search Results", w=width, h=height, x=right, y=top)
     except Exception:
-      olx.Popup('TimerPlus_search_results', wFilePath)
-    OV.ShowModal('TimerPlus_search_results')
+      if right is not None and top is not None:
+        olx.Popup('TimerPlus_search_results', wFilePath, x=right, y=top)
+      else:
+        olx.Popup('TimerPlus_search_results', wFilePath)
+    try:
+      OV.ShowModal('TimerPlus_search_results')
+    finally:
+      if restore_history:
+        self.show_history()
 
-  def edit_history(self):
+  def _show_search_results_after_history(self):
+    if self._history_modal_open:
+      olx.Schedule(1, "spy.TimerPlus._show_search_results_after_history()")
+      return
+    self.show_search_results(restore_history=True)
+
+  def set_timing_edit_enabled(self, state):
+    """Require confirmation before enabling edits to timing data or molecule name."""
+    enabled = str(state).strip().lower() in ('true', '1', 'yes', 'y')
+    if enabled:
+      confirmed = OV.Alert(
+        'Edit Timing History',
+        'Changing the molecule name or timing values will overwrite the recorded history. Continue?',
+        'YN'
+      )
+      if not confirmed or 'Y' not in str(confirmed).upper():
+        enabled = False
+        OV.SetControlState('TimerPlus_history_edit.EDIT_TIMING_EDIT', 'false', check=False)
+
+    value = 'True' if enabled else 'False'
+    for name in (
+      'EDIT_MOL',
+      'EDIT_WORK',
+      'EDIT_REFINE',
+      'EDIT_IDLE',
+      'EDIT_RUN',
+    ):
+      OV.SetControlEnabled('TimerPlus_history_edit.' + name, value, check=False)
+
+  def edit_history(self, restore_history=False):
     """Open the edit form popup for timing history."""
+    if self._history_modal_open and not restore_history:
+      if OV.IsPopup('TimerPlus_history'):
+        OV.EndModal('TimerPlus_history', 0)
+      olx.Schedule(1, "spy.TimerPlus._show_edit_after_history()")
+      return
     try:
       wFilePath = os.path.join(self.p_path, 'TimerPlus_history_edit.htm')
+      width, height, left, top = self._get_edit_popup_layout()
       try:
-        olx.Popup('TimerPlus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=600, h=360)
+        olx.Popup('TimerPlus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=width, h=height, x=left, y=top)
       except Exception:
-        olx.Popup('TimerPlus_history_edit', wFilePath)
+        if left is not None and top is not None:
+          olx.Popup('TimerPlus_history_edit', wFilePath, x=left, y=top)
+        else:
+          olx.Popup('TimerPlus_history_edit', wFilePath)
       OV.ShowModal('TimerPlus_history_edit')
     except Exception as e:
       print("TimerPlus: could not open edit history popup: %s" % str(e))
 
-  def edit_history_for(self, mol_name):
+  def edit_history_for(self, mol_name, restore_history=False):
     """Open the edit popup prefilled for a specific molecule name."""
+    if self._history_modal_open and not restore_history:
+      if OV.IsPopup('TimerPlus_history'):
+        OV.EndModal('TimerPlus_history', 0)
+      safe_name = str(mol_name).replace("\\", "\\\\").replace("'", "\\'")
+      safe_name = safe_name.replace("\r", "\\r").replace("\n", "\\n")
+      olx.Schedule(1, "spy.TimerPlus._show_edit_after_history('%s')" % safe_name)
+      return
     try:
       name = str(mol_name)
       # Set TIMER_MOL so the popup template can read it immediately via GetVar
@@ -1643,6 +1755,7 @@ class TimerPlus(PT):
         refine_val = self._format_time(float(rec.get('total_refine_time', 0.0) or 0.0))
         idle_val = self._format_time(float(rec.get('total_idle_time', 0.0) or 0.0))
         run_val = self._format_time(float(rec.get('total_run_time', 0.0) or 0.0))
+        comment_val = str(rec.get('comment', '') or '')
         try:
           OV.SetVar('TIMER_WORK', work_val)
         except Exception:
@@ -1659,13 +1772,21 @@ class TimerPlus(PT):
           OV.SetVar('TIMER_RUN', run_val)
         except Exception:
           pass
+        try:
+          OV.SetVar('TIMER_COMMENT', comment_val)
+        except Exception:
+          pass
       except Exception:
         pass
+      width, height, left, top = self._get_edit_popup_layout()
       wFilePath = os.path.join(self.p_path, 'TimerPlus_history_edit.htm')
       try:
-        olx.Popup('TimerPlus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=600, h=360)
+        olx.Popup('TimerPlus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=width, h=height, x=left, y=top)
       except Exception:
-        olx.Popup('TimerPlus_history_edit', wFilePath)
+        if left is not None and top is not None:
+          olx.Popup('TimerPlus_history_edit', wFilePath, x=left, y=top)
+        else:
+          olx.Popup('TimerPlus_history_edit', wFilePath)
       # Ensure the fields are set after popup is created
       try:
         # Set the molecule display and the work time (try both qualified and bare names)
@@ -1692,6 +1813,24 @@ class TimerPlus(PT):
       OV.ShowModal('TimerPlus_history_edit')
     except Exception as e:
       print("TimerPlus: could not open edit history popup: %s" % str(e))
+
+  def _show_edit_after_history(self, mol_name=""):
+    if self._history_modal_open:
+      safe_name = str(mol_name).replace("\\", "\\\\").replace("'", "\\'")
+      safe_name = safe_name.replace("\r", "\\r").replace("\n", "\\n")
+      command = "spy.TimerPlus._show_edit_after_history('%s')" % safe_name
+      olx.Schedule(1, command)
+      return
+
+    self._history_child_requires_restore = True
+    try:
+      if mol_name:
+        self.edit_history_for(mol_name, restore_history=True)
+      else:
+        self.edit_history(restore_history=True)
+    finally:
+      self._history_child_requires_restore = False
+    self.show_history()
 
   def _prefill_edit_popup(self, mol_name):
     """Helper scheduled to prefill popup controls if immediate SetValue failed."""
@@ -1720,16 +1859,16 @@ class TimerPlus(PT):
     """Format seconds using the configured display resolution."""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
-    if seconds%60 >= 30:
-      minutes += 1
-      if minutes >= 60:
-        hours += 1
-        minutes = 0
     try:
       resolution = str(OV.GetParam('TimerPlus.time_resolution', 'second')).lower()
     except Exception:
       resolution = 'second'
     if resolution == 'minute':
+      if seconds%60 >= 30:
+            minutes += 1
+            if minutes >= 60:
+              hours += 1
+              minutes = 0
       return "%02d:%02d" % (hours, minutes)
     secs = int(seconds % 60)
     return "%02d:%02d:%02d" % (hours, minutes, secs)
@@ -1879,7 +2018,7 @@ class TimerPlus(PT):
     except Exception as e:
       return "<div>Error generating edit form: %s</div>" % str(e)
 
-  def update_history(self, mol_name, work_time_str, refine_time_str=None, idle_time_str=None, run_time_str=None, orig_mol_name=None):
+  def update_history(self, mol_name, work_time_str, refine_time_str=None, idle_time_str=None, run_time_str=None, orig_mol_name=None, comment=None, update_timing=True):
     """Update stored timing values for `mol_name` and save to JSON.
 
     If `orig_mol_name` is provided and differs, the existing entry is treated as a rename.
@@ -1899,6 +2038,19 @@ class TimerPlus(PT):
             orig = o
       except Exception:
         orig = None
+
+      if not update_timing:
+        target = orig or mol
+        if target not in self.molecule_timings:
+          return "No molecule selected"
+        if comment is not None:
+          self.molecule_timings[target]['comment'] = str(comment)
+        self.save_timing_data([target])
+        try:
+          olx.html.Update()
+        except Exception:
+          pass
+        return "Updated comment for %s" % target
 
       # Rename behavior: if user changed molecule name in edit popup,
       # move the original record key instead of creating a duplicate row.
@@ -1929,6 +2081,7 @@ class TimerPlus(PT):
           'total_refine_time': refine_secs,
           'total_idle_time': idle_secs,
           'total_run_time': run_secs,
+          'comment': str(comment or ''),
           'last_updated': datetime.now().isoformat()
         }
       else:
@@ -1949,6 +2102,8 @@ class TimerPlus(PT):
         if run_secs is None:
           run_secs = work_secs + refine_secs + idle_secs
         rec['total_run_time'] = run_secs
+        if comment is not None:
+          rec['comment'] = str(comment)
         rec['last_updated'] = datetime.now().isoformat()
       self.save_timing_data([mol])
       try:
@@ -2045,9 +2200,25 @@ class TimerPlus(PT):
             run = tv
         except Exception:
           pass
+      comment = None
+      for n in ('TimerPlus_history_edit.EDIT_COMMENT', 'EDIT_COMMENT'):
+        try:
+          v = olx.html.GetValue(n)
+          if v is not None:
+            comment = v
+            break
+        except Exception:
+          continue
+      if comment is None:
+        try:
+          comment = OV.GetVar('TIMER_COMMENT')
+        except Exception:
+          pass
       if not mol_name:
         return 'No molecule selected'
-      if work is None:
+      timing_edit_state = OV.GetControlState('TimerPlus_history_edit.EDIT_TIMING_EDIT', check=False)
+      update_timing = str(timing_edit_state).strip().lower() in ('true', '1', 'yes', 'y')
+      if update_timing and work is None:
         return 'No work value'
       orig_mol = None
       try:
@@ -2064,7 +2235,7 @@ class TimerPlus(PT):
         except Exception:
           pass
 
-      result = self.update_history(mol_name, work, refine, idle, run, orig_mol)
+      result = self.update_history(mol_name, work, refine, idle, run, orig_mol, comment, update_timing)
       try:
         OV.SetVar('TIMER_MOL', mol_name)
       except Exception:
@@ -2080,7 +2251,8 @@ class TimerPlus(PT):
         pass
       try:
         # Rebuild the history popup so the updated JSON-backed values are visible.
-        self.show_history()
+        if not self._history_child_requires_restore:
+          self.show_history()
       except Exception:
         pass
       try:
@@ -2169,7 +2341,7 @@ class TimerPlus(PT):
     """Get formatted HTML table of timing history filtered by search term"""
     search_term = self._history_search_term.lower().strip()
     if not search_term:
-      return "<tr><td colspan='7' style='text-align:center; color:#666;'>Enter a structure name above and click Search.</td></tr>"
+      return "<tr><td colspan='8' style='text-align:center; color:#666;'>Enter a structure name above and click Search.</td></tr>"
 
     self.check_and_switch_molecule(do_autosave=False)
     
@@ -2218,6 +2390,7 @@ class TimerPlus(PT):
         'refine': data.get('total_refine_time', 0.0),
         'idle': data.get('total_idle_time', 0.0),
         'total': data.get('total_run_time', 0.0),
+        'comment': data.get('comment', ''),
         'updated': updated,
         'is_current': False
       }
@@ -2241,12 +2414,13 @@ class TimerPlus(PT):
           'refine': current_session_refine,
           'idle': current_idle,
           'total': current_total,
+          'comment': '',
           'updated': "Active Now",
           'is_current': True
         }
     
     if not molecules_to_show:
-      return "<tr><td colspan='7' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
+      return "<tr><td colspan='8' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
     
     html_rows = []
     # Sort by current first, then by last updated
@@ -2261,17 +2435,17 @@ class TimerPlus(PT):
     # Apply search filter if search term is set
     sorted_molecules = [
       (name, data) for name, data in sorted_molecules
-      if search_term in name.lower()
+      if search_term in name.lower() or search_term in str(data.get('comment') or '').lower()
     ]
     html_rows.append(
       "<tr style='background-color: #fff8dc; font-weight: bold;'>" +
-      "<td colspan='7' style='text-align:center; color: #0066cc; padding: 8px;'>" +
+      "<td colspan='8' style='text-align:center; color: #0066cc; padding: 8px;'>" +
       "Found %d of %d structures matching '%s'" % (len(sorted_molecules), total_count, search_term) +
       "</td></tr>"
     )
     if not sorted_molecules:
       html_rows.append(
-        "<tr><td colspan='7' style='text-align:center;'>No structures found matching '%s'</td></tr>" % search_term
+        "<tr><td colspan='8' style='text-align:center;'>No structures found matching '%s'</td></tr>" % search_term
       )
     
     # Show ALL (no 5-item limit for popup)
@@ -2287,17 +2461,19 @@ class TimerPlus(PT):
       
       # Escape single quotes for JS call
       safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
-      name_link = self._molecule_name_link(mol_name)
+      name_link = self._molecule_name_link(mol_name, close_search=True)
       edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+      comment = html_lib.escape(str(data.get('comment') or ''))
       html_rows.append(
         "<tr style='background-color: %s;'>" % bg_color +
-        "<td width='18%%' style='padding:6px;'>%s</td>" % name_link +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
-        "<td width='14%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
-        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
-        "<td width='22%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
+        "<td width='16%%' style='padding:6px;'>%s</td>" % name_link +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
+        "<td width='20%%' style='padding:6px;'>%s</td>" % comment +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
         "</tr>"
       )
     
@@ -2345,6 +2521,7 @@ class TimerPlus(PT):
           'refine': data.get('total_refine_time', 0.0),
           'idle': data.get('total_idle_time', 0.0),
           'total': data.get('total_run_time', 0.0),
+          'comment': data.get('comment', ''),
           'wfn': data.get('wave_function_time', {}),
           'updated': updated,
           'is_current': is_current
@@ -2360,7 +2537,7 @@ class TimerPlus(PT):
       # FILTER: Only keep molecules matching search term
       filtered = [
         (name, data) for name, data in sorted_molecules 
-        if search_term in name.lower()
+        if search_term in name.lower() or search_term in str(data.get('comment') or '').lower()
       ]
       
       if not filtered:
@@ -2400,7 +2577,7 @@ class TimerPlus(PT):
         # Escape single quotes for JS call
         safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
         edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
-        name_link = self._molecule_name_link(mol_name)
+        name_link = self._molecule_name_link(mol_name, close_search=True)
         html += (
           "<tr style='background-color: %s; border: 1px solid #bdc3c7;'>" % bg_color +
           "<td style='padding: 8px; width: 18%%;'>%s</td>" % name_link +
@@ -2429,6 +2606,7 @@ class TimerPlus(PT):
       refine_val = self._format_time(float(rec.get('total_refine_time', 0.0) or 0.0))
       idle_val = self._format_time(float(rec.get('total_idle_time', 0.0) or 0.0))
       run_val = self._format_time(float(rec.get('total_run_time', 0.0) or 0.0))
+      comment_val = str(rec.get('comment', '') or '')
       try:
         try:
           olx.html.SetValue('TimerPlus_history_edit.EDIT_WORK', work_val)
@@ -2460,6 +2638,14 @@ class TimerPlus(PT):
           pass
         try:
           olx.html.SetValue('EDIT_RUN', run_val)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('TimerPlus_history_edit.EDIT_COMMENT', comment_val)
+        except Exception:
+          pass
+        try:
+          olx.html.SetValue('EDIT_COMMENT', comment_val)
         except Exception:
           pass
       except Exception:
