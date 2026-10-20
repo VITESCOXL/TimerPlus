@@ -1428,18 +1428,18 @@ class TimerPlus(PT):
       opener = 'open_molecule_from_history'
     else:
       opener = 'open_molecule'
-    onclick = html_lib.escape(
-      "spy.TimerPlus.%s('%s'); return false" % (opener, safe_name), quote=True)
+    command = html_lib.escape(
+      "spy.TimerPlus.%s('%s')" % (opener, safe_name), quote=True)
     display_name = html_lib.escape(self._short_name(mol_name))
-    return "<a href=\"Click to open molecule\" onclick=\"%s\"><b>%s</b></a>" % (onclick, display_name)
+    return "<a href=\"%s\" target=\"Click to open molecule\"><b>%s</b></a>" % (command, display_name)
 
   def _edit_history_link(self, mol_name):
-    """Render an edit link without exposing its command in the hover status."""
+    """Render an edit link that opens the selected molecule's history editor."""
     safe_name = str(mol_name).replace("\\", "\\\\").replace("'", "\\'")
     safe_name = safe_name.replace("\r", "\\r").replace("\n", "\\n")
-    onclick = html_lib.escape(
-      "spy.TimerPlus.edit_history_for('%s'); return false" % safe_name, quote=True)
-    return "<a href=\"Click to add a comment or edit timing\" onclick=\"%s\">Edit</a>" % onclick
+    command = html_lib.escape(
+      "spy.TimerPlus.edit_history_for('%s')" % safe_name, quote=True)
+    return "<a href=\"%s\" target=\"Click to add a comment or edit timing\">Edit</a>" % command
 
   def _short_date(self, updated):
     """'2026-10-05 16:11:17' -> 'Mon 5th Oct, 16:11'; the year is added
