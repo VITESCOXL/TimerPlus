@@ -60,7 +60,6 @@ class TimerPlus(PT):
     self.molecule_timings = self.load_timing_data()
     self._history_search_term = ""  # For filtering in history popup
     self._history_modal_open = False
-    self._history_child_requires_restore = False
     self.current_molecule = None
     self.current_start_time = None
     self.current_idle_start = None
@@ -75,9 +74,9 @@ class TimerPlus(PT):
     self._refresh_active = False
     self._idle_seconds = 0.0
     self._idle_last_update = time.time()
-    self._last_activity_time = time.time()
-    self._idle_grace = float(OV.GetParam('TimerPlus.idle_grace', 60.0) or 60.0)
     self._last_mouse_pos = None
+    self._mouse_sample_initialized = False
+    self._activity_tracking_active = False
     
     OV.registerFunction(self.print_formula,True,self.p_name)
     OV.registerFunction(self.get_idle_time,True,self.p_name)
@@ -98,6 +97,7 @@ class TimerPlus(PT):
     OV.registerFunction(self.get_work_time_for_dataset,True,self.p_name)
     OV.registerFunction(self.update_timer_vars,True,self.p_name)
     OV.registerFunction(self._tick,True,self.p_name)
+    OV.registerFunction(self._track_mouse_activity,True,self.p_name)
     OV.registerFunction(self._retry_nospher,True,self.p_name)
     OV.registerFunction(self.getPublicationContact, True, self.p_name)
     OV.registerFunction(self.show_history, True, self.p_name)
@@ -135,11 +135,7 @@ class TimerPlus(PT):
     for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN', 'TIMER_WFN', 'TIMER_USER', 'TIMER_COMMENT'):
       OV.SetVar(_var, '')
     self.update_timer_vars()
-
-    # Patch multiple datasets removed (was optional UI badge)
-
-    # Start recurring display refresh based on phil refresh_interval (Currently inactive)
-    # self._start_refresh_timer()
+    self._start_activity_tracking()
 
   # _patch_multiple_dataset removed — optional GUI badge feature disabled
 
@@ -393,7 +389,6 @@ class TimerPlus(PT):
   def _on_file_changed(self, filetype):
     """Called automatically by Olex2 whenever a structure is opened."""
     try:
-      self._mark_activity()
       self.check_and_switch_molecule()
       self.update_timer_vars(push_controls=True)
       try:
@@ -419,7 +414,6 @@ class TimerPlus(PT):
   def _on_refine_start(self, caller):
     """Listener called by RunPrg when a run/refine starts."""
     try:
-      self._mark_activity()
       self._refine_start_time = time.time()
       self._refine_active = True
       # Keep idle clock timestamp current so no gap is counted on resume
@@ -439,7 +433,6 @@ class TimerPlus(PT):
       self._refine_active = False
       # Advance the idle clock baseline so the refine period is not counted as idle
       self._idle_last_update = time.time()
-      self._mark_activity()
       olx.Schedule(3, "spy.TimerPlus.refresh_display()")  # Update display immediately after refine ends
       # After a refine ends, attempt to parse NoSpher output.
       # Schedule a retry 4 s later so the file has time to be fully written.
@@ -503,6 +496,32 @@ class TimerPlus(PT):
     # if self._refresh_active and self._refresh_interval and self._refresh_interval > 0:
     #   olx.Schedule(self._refresh_interval, "spy.TimerPlus._tick()")
 
+  def _start_activity_tracking(self):
+    """Start one-second pointer sampling without refreshing the timer GUI."""
+    self._activity_tracking_active = True
+    self._sample_pointer_activity()
+    self._schedule_activity_sample()
+
+  def _schedule_activity_sample(self):
+    if not self._activity_tracking_active:
+      return
+    try:
+      olx.Schedule(1, "spy.TimerPlus._track_mouse_activity()")
+    except Exception as e:
+      self._activity_tracking_active = False
+      print("TimerPlus: could not schedule mouse activity tracking: %s" % e)
+
+  def _track_mouse_activity(self):
+    """Sample mouse movement and maintain timing, without updating the GUI."""
+    if not self._activity_tracking_active:
+      return
+    try:
+      self._sample_pointer_activity()
+      self.check_and_switch_molecule()
+    except Exception as e:
+      print("TimerPlus: mouse activity tracking failed: %s" % e)
+    self._schedule_activity_sample()
+
   _work_note_re = re.compile(r'(?:\s*\|\s*)?Work: (?:\d+(?::\d+)+|(?:\d+h)?(?:\d+min)?(?:\d+s)?)')
 
   def _format_duration(self, seconds):
@@ -557,20 +576,17 @@ class TimerPlus(PT):
     now = time.time()
     self._idle_seconds = 0.0
     self._idle_last_update = now
-    self._last_activity_time = now
     self._last_mouse_pos = None
+    self._mouse_sample_initialized = False
+    self._sample_pointer_activity()
     if reset_gui:
       try:
         olex_gui.ResetIdleTime()
       except Exception:
         pass
- 
-
-  def _mark_activity(self):
-    self._last_activity_time = time.time()
 
   def _sample_pointer_activity(self):
-    """Treat mouse motion as user activity for plugin-side idle tracking."""
+    """Classify each sampled interval as work when the mouse moved, else idle."""
     try:
       x = int(olx.GetMouseX())
       y = int(olx.GetMouseY())
@@ -584,39 +600,39 @@ class TimerPlus(PT):
         inside_local = (0 <= x < w) and (0 <= y < h)
         inside_absolute = (x0 <= x < (x0 + w)) and (y0 <= y < (y0 + h))
         if not (inside_local or inside_absolute):
-          self._last_mouse_pos = None
-          return
+          pos = None
+        else:
+          pos = (x, y)
+      else:
+        pos = (x, y)
 
-      pos = (x, y)
-      if self._last_mouse_pos is None:
+      now = time.time()
+      if not self._mouse_sample_initialized:
         self._last_mouse_pos = pos
+        self._mouse_sample_initialized = True
+        self._idle_last_update = now
         return
-      if pos != self._last_mouse_pos:
-        self._mark_activity()
-      self._last_mouse_pos = pos
-    except Exception:
-      pass
 
-  def _update_idle_clock(self):
-    """Advance plugin-side idle counter using recent activity timestamps."""
-    now = time.time()
-    dt = max(0.0, now - self._idle_last_update)
-    self._idle_last_update = now
-    # Do not count idle while refinement is running
-    if not getattr(self, '_refine_active', False) and (now - self._last_activity_time) >= self._idle_grace:
-      self._idle_seconds += dt
-    return self._idle_seconds
+      dt = max(0.0, now - self._idle_last_update)
+      moved = pos is not None and self._last_mouse_pos is not None and pos != self._last_mouse_pos
+      if not getattr(self, '_refine_active', False) and not moved:
+        self._idle_seconds += dt
+      self._idle_last_update = now
+      self._last_mouse_pos = pos
+    except Exception as e:
+      print("TimerPlus: could not sample mouse position: %s" % e)
 
   def _get_idle_seconds(self):
     """Return idle seconds derived from plugin-tracked activity."""
     self._sample_pointer_activity()
-    return self._update_idle_clock()
+    return self._idle_seconds
 
   
 
   def __del__(self):
     """Restore RunRefinementPrg.run and save timing on unload."""
     self._stop_refresh_timer()
+    self._activity_tracking_active = False
     try:
       self.save_current_molecule_timing()
     except:
@@ -1158,7 +1174,6 @@ class TimerPlus(PT):
   
   def update_timing(self):
     """Force update and save current molecule timing"""
-    self._mark_activity()
     self.check_and_switch_molecule()
     self.save_current_molecule_timing()
     return "Timing saved and updated"
@@ -1244,7 +1259,6 @@ class TimerPlus(PT):
   
   def reset_current_timing(self):
     """Reset timing for current molecule"""
-    self._mark_activity()
     # Ensure we use the same molecule key format as stored in `molecule_timings`
     self.check_and_switch_molecule(do_autosave=False)
     mol_name = self.current_molecule
@@ -1311,6 +1325,7 @@ class TimerPlus(PT):
         'refine': data.get('total_refine_time', 0.0),
         'idle': data.get('total_idle_time', 0.0),
         'total': data.get('total_run_time', 0.0),
+        'manually_edited_times': data.get('manually_edited_times', False),
         'updated': updated,
         'is_current': False
       }
@@ -1334,6 +1349,7 @@ class TimerPlus(PT):
           'refine': current_session_refine,
           'idle': current_idle,
           'total': current_total,
+          'manually_edited_times': False,
           'updated': "Active Now",
           'is_current': True
         }
@@ -1358,14 +1374,13 @@ class TimerPlus(PT):
       wfn_str = self._get_wavefunction_time_str(mol_name, data)
       
       # Highlight current molecule
-      bg_color = "#e8f4f8" if data['is_current'] else "#ffffff"
+      manually_edited = data.get('manually_edited_times', False)
+      bg_color = "#fff2a8" if manually_edited else "#e8f4f8" if data['is_current'] else "#ffffff"
+      row_class = " class='timerplus-manually-edited'" if manually_edited else ""
 
-      # Escape single quotes for the spy call
-      safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
-      name_link = "<a href=\"spy.TimerPlus.open_molecule('%s')\"><b>%s</b></a>" % (
-        safe_name, self._short_name(mol_name))
+      name_link = self._molecule_name_link(mol_name)
       html_rows.append(
-        "<tr style='background-color: %s;'>" % bg_color +
+        "<tr%s style='background-color: %s;'>" % (row_class, bg_color) +
         "<td width='34%%' style='padding:6px;'>%s</td>" % name_link +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
@@ -1413,10 +1428,18 @@ class TimerPlus(PT):
       opener = 'open_molecule_from_history'
     else:
       opener = 'open_molecule'
-    href = html_lib.escape(
-      "spy.TimerPlus.%s('%s')" % (opener, safe_name), quote=True)
+    onclick = html_lib.escape(
+      "spy.TimerPlus.%s('%s'); return false" % (opener, safe_name), quote=True)
     display_name = html_lib.escape(self._short_name(mol_name))
-    return "<a href=\"%s\"><b>%s</b></a>" % (href, display_name)
+    return "<a href=\"Click to open molecule\" onclick=\"%s\"><b>%s</b></a>" % (onclick, display_name)
+
+  def _edit_history_link(self, mol_name):
+    """Render an edit link without exposing its command in the hover status."""
+    safe_name = str(mol_name).replace("\\", "\\\\").replace("'", "\\'")
+    safe_name = safe_name.replace("\r", "\\r").replace("\n", "\\n")
+    onclick = html_lib.escape(
+      "spy.TimerPlus.edit_history_for('%s'); return false" % safe_name, quote=True)
+    return "<a href=\"Click to add a comment or edit timing\" onclick=\"%s\">Edit</a>" % onclick
 
   def _short_date(self, updated):
     """'2026-10-05 16:11:17' -> 'Mon 5th Oct, 16:11'; the year is added
@@ -1534,6 +1557,7 @@ class TimerPlus(PT):
         'idle': data.get('total_idle_time', 0.0),
         'total': data.get('total_run_time', 0.0),
         'comment': data.get('comment', ''),
+        'manually_edited_times': data.get('manually_edited_times', False),
         'updated': updated,
         'is_current': False
       }
@@ -1558,6 +1582,7 @@ class TimerPlus(PT):
           'idle': current_idle,
           'total': current_total,
           'comment': '',
+          'manually_edited_times': False,
           'updated': "Active Now",
           'is_current': True
         }
@@ -1582,15 +1607,15 @@ class TimerPlus(PT):
       wfn_str = self._get_wavefunction_time_str(mol_name, data)
       
       # Highlight current molecule
-      bg_color = "#e8f4f8" if data['is_current'] else "#ffffff"
+      manually_edited = data.get('manually_edited_times', False)
+      bg_color = "#fff2a8" if manually_edited else "#e8f4f8" if data['is_current'] else "#ffffff"
+      row_class = " class='timerplus-manually-edited'" if manually_edited else ""
       
-      # Escape single quotes for JS call
-      safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
       name_link = self._molecule_name_link(mol_name, close_history=True)
-      edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+      edit_link = self._edit_history_link(mol_name)
       comment = html_lib.escape(str(data.get('comment') or ''))
       html_rows.append(
-        "<tr style='background-color: %s;'>" % bg_color +
+        "<tr%s style='background-color: %s;'>" % (row_class, bg_color) +
         "<td width='16%%' style='padding:6px;'>%s</td>" % name_link +
         "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
         "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
@@ -1690,7 +1715,7 @@ class TimerPlus(PT):
     if enabled:
       confirmed = OV.Alert(
         'Edit Timing History',
-        'Changing the molecule name or timing values will overwrite the recorded history. Continue?',
+        'Changing the molecule timing values will overwrite the recorded history. Changing the molecule name will create a snapshot of the current state with the selected name. Continue?',
         'YN'
       )
       if not confirmed or 'Y' not in str(confirmed).upper():
@@ -1706,6 +1731,15 @@ class TimerPlus(PT):
       'EDIT_RUN',
     ):
       OV.SetControlEnabled('TimerPlus_history_edit.' + name, value, check=False)
+
+  def _initialize_timing_edit_controls(self, mol_name):
+    """Restore the timing-edit checkbox state for a previously edited molecule."""
+    rec = self.molecule_timings.get(str(mol_name), {})
+    enabled = bool(rec.get('manually_edited_times', False))
+    value = 'true' if enabled else 'false'
+    OV.SetControlState('TimerPlus_history_edit.EDIT_TIMING_EDIT', value, check=False)
+    for name in ('EDIT_MOL', 'EDIT_WORK', 'EDIT_REFINE', 'EDIT_IDLE', 'EDIT_RUN'):
+      OV.SetControlEnabled('TimerPlus_history_edit.' + name, 'True' if enabled else 'False', check=False)
 
   def edit_history(self, restore_history=False):
     """Open the edit form popup for timing history."""
@@ -1787,6 +1821,10 @@ class TimerPlus(PT):
           olx.Popup('TimerPlus_history_edit', wFilePath, x=left, y=top)
         else:
           olx.Popup('TimerPlus_history_edit', wFilePath)
+      try:
+        self._initialize_timing_edit_controls(name)
+      except Exception as e:
+        print("TimerPlus: could not restore timing edit controls: %s" % e)
       # Ensure the fields are set after popup is created
       try:
         # Set the molecule display and the work time (try both qualified and bare names)
@@ -1822,14 +1860,10 @@ class TimerPlus(PT):
       olx.Schedule(1, command)
       return
 
-    self._history_child_requires_restore = True
-    try:
-      if mol_name:
-        self.edit_history_for(mol_name, restore_history=True)
-      else:
-        self.edit_history(restore_history=True)
-    finally:
-      self._history_child_requires_restore = False
+    if mol_name:
+      self.edit_history_for(mol_name, restore_history=True)
+    else:
+      self.edit_history(restore_history=True)
     self.show_history()
 
   def _prefill_edit_popup(self, mol_name):
@@ -2082,6 +2116,7 @@ class TimerPlus(PT):
           'total_idle_time': idle_secs,
           'total_run_time': run_secs,
           'comment': str(comment or ''),
+          'manually_edited_times': True,
           'last_updated': datetime.now().isoformat()
         }
       else:
@@ -2102,6 +2137,7 @@ class TimerPlus(PT):
         if run_secs is None:
           run_secs = work_secs + refine_secs + idle_secs
         rec['total_run_time'] = run_secs
+        rec['manually_edited_times'] = True
         if comment is not None:
           rec['comment'] = str(comment)
         rec['last_updated'] = datetime.now().isoformat()
@@ -2250,12 +2286,6 @@ class TimerPlus(PT):
       except Exception:
         pass
       try:
-        # Rebuild the history popup so the updated JSON-backed values are visible.
-        if not self._history_child_requires_restore:
-          self.show_history()
-      except Exception:
-        pass
-      try:
         # Refresh the live timing values in the main UI as well.
         self.update_timer_vars(push_controls=True)
       except Exception:
@@ -2391,6 +2421,7 @@ class TimerPlus(PT):
         'idle': data.get('total_idle_time', 0.0),
         'total': data.get('total_run_time', 0.0),
         'comment': data.get('comment', ''),
+        'manually_edited_times': data.get('manually_edited_times', False),
         'updated': updated,
         'is_current': False
       }
@@ -2415,6 +2446,7 @@ class TimerPlus(PT):
           'idle': current_idle,
           'total': current_total,
           'comment': '',
+          'manually_edited_times': False,
           'updated': "Active Now",
           'is_current': True
         }
@@ -2457,15 +2489,15 @@ class TimerPlus(PT):
       wfn_str = self._get_wavefunction_time_str(mol_name, data)
       
       # Highlight current molecule
-      bg_color = "#e8f4f8" if data['is_current'] else "#ffffff"
+      manually_edited = data.get('manually_edited_times', False)
+      bg_color = "#fff2a8" if manually_edited else "#e8f4f8" if data['is_current'] else "#ffffff"
+      row_class = " class='timerplus-manually-edited'" if manually_edited else ""
       
-      # Escape single quotes for JS call
-      safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
       name_link = self._molecule_name_link(mol_name, close_search=True)
-      edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+      edit_link = self._edit_history_link(mol_name)
       comment = html_lib.escape(str(data.get('comment') or ''))
       html_rows.append(
-        "<tr style='background-color: %s;'>" % bg_color +
+        "<tr%s style='background-color: %s;'>" % (row_class, bg_color) +
         "<td width='16%%' style='padding:6px;'>%s</td>" % name_link +
         "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
         "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
@@ -2523,6 +2555,7 @@ class TimerPlus(PT):
           'total': data.get('total_run_time', 0.0),
           'comment': data.get('comment', ''),
           'wfn': data.get('wave_function_time', {}),
+          'manually_edited_times': data.get('manually_edited_times', False),
           'updated': updated,
           'is_current': is_current
         }
@@ -2572,14 +2605,14 @@ class TimerPlus(PT):
         wfn_str = self._get_wavefunction_time_str(mol_name, data)
         
         # Highlight current molecule
-        bg_color = "#d5eef7" if data['is_current'] else "#ffffff"
+        manually_edited = data.get('manually_edited_times', False)
+        bg_color = "#fff2a8" if manually_edited else "#d5eef7" if data['is_current'] else "#ffffff"
+        row_class = " class='timerplus-manually-edited'" if manually_edited else ""
         
-        # Escape single quotes for JS call
-        safe_name = mol_name.replace("\\", "\\\\").replace("'", "\\'")
-        edit_link = "<a href=\"spy.TimerPlus.edit_history_for('%s')\">Edit</a>" % safe_name
+        edit_link = self._edit_history_link(mol_name)
         name_link = self._molecule_name_link(mol_name, close_search=True)
         html += (
-          "<tr style='background-color: %s; border: 1px solid #bdc3c7;'>" % bg_color +
+          "<tr%s style='background-color: %s; border: 1px solid #bdc3c7;'>" % (row_class, bg_color) +
           "<td style='padding: 8px; width: 18%%;'>%s</td>" % name_link +
           "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % work_str +
           "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % refine_str +

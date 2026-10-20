@@ -1,7 +1,7 @@
 
 <!-- #include tool-h3 gui\blocks\tool-h3.htm;image=#image;1; -->
 
-<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=StructureTimer_2; help_ext=StructureTimer_2;1; -->
+<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=TimerPlus; help_ext=TimerPlus-Extras-History;helpTxt=This table lists the last 5 recorded timing totals by structure, excluding the active structure if more than five is recorded.  Work, Refine, and WFN show their corresponding time totals, and Last Opened shows when the entry was last updated.;1; -->
   <td>
     <table width='100%' border='0' cellpadding='4' cellspacing='0'>
       <tr style='background-color: #f0f0f0;'>
@@ -17,27 +17,21 @@
 
 <!-- #include row_table_off gui\blocks\row_table_off.htm;1; -->
 
-<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=StructureTimer_2; help_ext=StructureTimer_2;1; -->
-
-  <td ALIGN='left' >
-    <small><i>Current molecule is highlighted in blue.</i></small>
-  </td>
+<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=TimerPlus; help_ext=TimerPlus-Extras-Reset;helpTxt=Clears the recorded timing totals for the active structure and starts its timing again. Use this only if you want to discard that structure history.;1; -->
 
   <td ALIGN='center'>
-    <a href="spy.TimerPlus.reset_current_timing()"><b>Reset Current Molecule</b></a>
+    $+
+    html.Snippet(GetVar(default_link),
+    "value=Reset Current Molecule Timing",
+    "onclick=spy.TimerPlus.reset_current_timing()",
+    )$-
   </td>
 <!-- #include row_table_off gui\blocks\row_table_off.htm;1; -->
 
-<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=StructureTimer_2; help_ext=StructureTimer_2;1; -->
+<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=TimerPlus; help_ext=TimerPlus-Extras-Resolution;helpTxt=Choose whether displayed timing values are rounded to minutes or shown to the nearest second. This changes display precision, not the underlying timing data.;1; -->
 
   <td >
-    $+
-    html.Snippet(GetVar(default_link),
-    "value=Reload Plugin",
-    "onclick=py.run C:\Users\LocalAdmin\Documents\olex2-dev\util\pyUtil\PluginLib\plugin-TimerPlus\TimerPlus.py",
-    )$-
-
-    <b>Time Resolution:</b>
+       <b>Time Resolution:</b>
     $+
     html.Snippet("gui/snippets/input-combo",
     "name=TimerPlus_TIME_RESOLUTION",
@@ -46,30 +40,6 @@
     "width=130",
     "readonly=true",
     "onchange=spy.SetParam('TimerPlus.time_resolution',html.GetValue('~name~'))>>html.Update()",
-    )$-
-
-    $+
-    html.Snippet(GetVar(default_link),
-    "value=Settings",
-    "onclick=spy.EditParams(TimerPlus)",
-    )$-
-
-    $+
-    html.Snippet(GetVar(default_link),
-    "value=Open Folder",
-    "onclick=shell C:\Program Files\Olex2-1.5/util/pyUtil/PluginLib//plugin-TimerPlus",
-    )$-
-
-    $+
-    html.Snippet(GetVar(default_link),
-    "value=Refresh",
-    "onclick=spy.TimerPlus.refresh_display()",
-    )$-
-
-    $+
-    html.Snippet(GetVar(default_link),
-    "value=History",
-    "onclick=spy.TimerPlus.show_history()",
     )$-
   </td>
 <!-- #include row_table_off gui\blocks\row_table_off.htm;1; -->

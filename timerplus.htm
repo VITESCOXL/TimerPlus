@@ -1,7 +1,11 @@
 
 <!-- #include tool-top gui/blocks/tool-top.htm;image=#image;onclick=#onclick;1; -->
 
-<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=StructureTimer_2; help_ext=StructureTimer_2;1; -->
+<style>
+  .timerplus-manually-edited td { background-color: #fff2a8 !important; }
+</style>
+
+<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=TimerPlus; help_ext=TimerPlus-Overview;helpTxt=Shows the active structure, current session time, and recorded user. Refresh updates the displayed totals. History opens the searchable timing history for all structures.;1; -->
 
   <td ALIGN='left' width='25%' style='padding:4px;'>
     <b>Session:</b> $spy.TimerPlus.get_session_time()
@@ -15,12 +19,24 @@
     <b>User:</b> $GetVar(TIMER_USER)
   </td>
 
-  <td ALIGN='left' width='25%' style='padding:4px;'>
-    <a href="spy.TimerPlus.refresh_display()">Refresh</a> | <a href="spy.TimerPlus.show_history()">History</a>
+  <td ALIGN='center' width='25%' style='padding:4px;'>
+    $+
+    html.Snippet(GetVar(default_link),
+    "value=Refresh",
+    "width=80",
+    "onclick=spy.TimerPlus.refresh_display()",
+    )$-
+    &nbsp;
+    $+
+    html.Snippet(GetVar(default_link),
+    "value=History",
+    "width=80",
+    "onclick=spy.TimerPlus.show_history()",
+    )$-
   </td>
 <!-- #include row_table_off gui/blocks/row_table_off.htm;1; -->
 
-<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=StructureTimer_2; help_ext=StructureTimer_2;1; -->
+<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=TimerPlus; help_ext=TimerPlus-Timing;helpTxt=These are cumulative times for the active structure. Work excludes detected idle and refinement time. Refine records refinement time, Idle is detected inactivity, Run is total recorded time, and WaveFn is time attributed to the wavefunction calculation. Display precision is set in TimerPlus Extras.;1; -->
 
   <td ALIGN='left' width='20%' style='padding:2px 4px;'>
     <b>Molecule:</b>
