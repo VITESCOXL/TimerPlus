@@ -1,15 +1,16 @@
 
 <!-- #include tool-h3 gui\blocks\tool-h3.htm;image=#image;1; -->
 
-<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=TimerPlus; help_ext=TimerPlus-Extras-History;helpTxt=This table lists the last 5 recorded timing totals by structure, excluding the active structure if more than five is recorded.  Work, Refine, and WFN show their corresponding time totals, and Last Opened shows when the entry was last updated.;1; -->
+<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=TimerPlus; help_ext=TimerPlus-Extras-History;helpTxt=This table lists the last 5 recorded timing totals by structure, excluding the active structure if more than five is recorded. Work is Model plus Refine. Total WFN sums runtimes from all WFN jobs and backup folders.;1; -->
   <td>
     <table width='100%' border='0' cellpadding='4' cellspacing='0'>
       <tr style='background-color: #f0f0f0;'>
-        <td width='34%' style='padding:6px; text-align:center;'><b>Molecule</b></td>
+        <td width='25%' style='padding:6px; text-align:center;'><b>Molecule</b></td>
         <td width='12%' style='padding:6px; text-align:center;'><b>Work</b></td>
         <td width='12%' style='padding:6px; text-align:center;'><b>Refine</b></td>
         <td width='12%' style='padding:6px; text-align:center;'><b>WFN</b></td>
-        <td width='30%' style='padding:6px; text-align:center;'><b>Last Opened</b></td>
+        <td width='12%' style='padding:6px; text-align:center;'><b>Total WFN</b></td>
+        <td width='27%' style='padding:6px; text-align:center;'><b>Last Opened</b></td>
       </tr>
       $spy.TimerPlus.get_timing_history()
     </table>

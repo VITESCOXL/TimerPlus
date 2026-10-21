@@ -81,6 +81,7 @@ class TimerPlus(PT):
     OV.registerFunction(self.print_formula,True,self.p_name)
     OV.registerFunction(self.get_idle_time,True,self.p_name)
     OV.registerFunction(self.get_work_time,True,self.p_name)
+    OV.registerFunction(self.get_total_work_time,True,self.p_name)
     OV.registerFunction(self.get_running_time,True,self.p_name)
     OV.registerFunction(self.get_molecule_name,True,self.p_name)
     OV.registerFunction(self.get_timing_history,True,self.p_name)
@@ -132,7 +133,7 @@ class TimerPlus(PT):
     self.check_and_switch_molecule()
 
     # Initialise display variables so the HTML panel never shows missing-var errors
-    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN', 'TIMER_WFN', 'TIMER_USER', 'TIMER_COMMENT'):
+    for _var in ('TIMER_MOL', 'TIMER_WORK', 'TIMER_TOTAL_WORK', 'TIMER_REFINE', 'TIMER_IDLE', 'TIMER_RUN', 'TIMER_WFN', 'TIMER_TOTAL_WFN', 'TIMER_USER', 'TIMER_COMMENT'):
       OV.SetVar(_var, '')
     self.update_timer_vars()
     self._start_activity_tracking()
@@ -522,7 +523,7 @@ class TimerPlus(PT):
       print("TimerPlus: mouse activity tracking failed: %s" % e)
     self._schedule_activity_sample()
 
-  _work_note_re = re.compile(r'(?:\s*\|\s*)?Work: (?:\d+(?::\d+)+|(?:\d+h)?(?:\d+min)?(?:\d+s)?)')
+  _work_note_re = re.compile(r'(?:\s*\|\s*)?(?:Model|Work): (?:\d+(?::\d+)+|(?:\d+h)?(?:\d+min)?(?:\d+s)?)')
 
   def _format_duration(self, seconds):
     """'3h23min' (or '3h23min05s' at 'second' resolution), so that it reads
@@ -556,7 +557,7 @@ class TimerPlus(PT):
       note = ''
       if (OV.GetParam('TimerPlus.notify_work_time', True)
           and self.current_molecule and self.current_molecule != "No structure loaded"):
-        note = 'Work: %s' % self._format_duration(self.get_work_time())
+        note = 'Work: %s' % self._format_duration(self.get_total_work_time())
         if re.sub(r'<[^>]*>', '', head).strip():
           note = ' | ' + note
       if not cur:
@@ -626,6 +627,10 @@ class TimerPlus(PT):
     """Return idle seconds derived from plugin-tracked activity."""
     self._sample_pointer_activity()
     return self._idle_seconds
+
+  def _get_session_refine_wall_time(self):
+    """Return refinement wall time to exclude from the current work interval."""
+    return self._session_refine_time + getattr(self, '_nospher_wall_clock', 0.0)
 
   
 
@@ -845,7 +850,7 @@ class TimerPlus(PT):
       elapsed = time.time() - self.current_start_time
       idle = self._get_idle_seconds()
       # Deduct both the listener-tracked refine time and any NoSpher wall-clock time
-      wall_refine = self._session_refine_time + getattr(self, '_nospher_wall_clock', 0.0)
+      wall_refine = self._get_session_refine_wall_time()
       work = max(0, elapsed - idle - wall_refine)
       
       if self.current_molecule in self.molecule_timings:
@@ -1087,6 +1092,11 @@ class TimerPlus(PT):
       # (total_refine_time from the file is already the authoritative value).
       self._nospher_wall_clock = float(self._session_refine_time)
       self._session_refine_time = 0.0
+      try:
+        self.update_timer_vars(push_controls=True)
+        olx.html.Update()
+      except Exception:
+        pass
       return parsed
     except Exception as e:
       return None
@@ -1108,7 +1118,8 @@ class TimerPlus(PT):
       
     print("Molecule: %s" % self.current_molecule)
     print("Idle time: %.1f" %(self.get_idle_time()))
-    print("Work time: %.1f" %(self.get_work_time()))
+    print("Model time: %.1f" %(self.get_work_time()))
+    print("Work time: %.1f" %(self.get_total_work_time()))
     print("Running time: %.1f"  %(self.get_running_time()))
     try:
       olx.html.Update()
@@ -1131,7 +1142,7 @@ class TimerPlus(PT):
       return 0.0
   
   def get_work_time(self):
-    """Get work time for current molecule"""
+    """Get model time for current molecule, excluding idle and refinement."""
     self.check_and_switch_molecule(do_autosave=False)
     try:
       if self.current_molecule == "No structure loaded" or self.current_molecule is None:
@@ -1142,14 +1153,20 @@ class TimerPlus(PT):
         return 0.0
       elapsed = time.time() - self.current_start_time
       idle = self._get_idle_seconds()
-      session_refine = self._session_refine_time
-      work = max(0, elapsed - idle - session_refine)
+      work = max(0, elapsed - idle - self._get_session_refine_wall_time())
       total_work = self.molecule_timings.get(self.current_molecule, {}).get('total_work_time', 0.0)
       result = round(float(total_work + work), 1)
       return result
     except Exception:
       return 0.0
   
+  def get_total_work_time(self):
+    """Get model time plus refinement time for the current molecule."""
+    try:
+      return round(self.get_work_time() + self.get_refine_time(), 1)
+    except Exception:
+      return 0.0
+
   def get_running_time(self):
     """Get running time for current molecule"""
     self.check_and_switch_molecule(do_autosave=False)
@@ -1220,10 +1237,16 @@ class TimerPlus(PT):
     # When NoSpher is enabled, total_refine_time is authoritative (set from the file)
     # and _session_refine_time has been zeroed out in _scan_and_apply_nospher.
     # For work, deduct both session refine and any NoSpher wall-clock.
-    wall_refine = self._session_refine_time + getattr(self, '_nospher_wall_clock', 0.0)
+    wall_refine = self._get_session_refine_wall_time()
+    model_time = (
+      self.molecule_timings[mol].get('total_work_time', 0.0) +
+      max(0.0, elapsed - current_idle - wall_refine)
+    )
+    refine_time = self.molecule_timings[mol].get('total_refine_time', 0.0) + self._session_refine_time
     totals = {
-      'WORK': self.molecule_timings[mol].get('total_work_time', 0.0) + max(0.0, elapsed - current_idle - wall_refine),
-      'REFINE': self.molecule_timings[mol].get('total_refine_time', 0.0) + self._session_refine_time,
+      'WORK': model_time,
+      'TOTAL_WORK': model_time + refine_time,
+      'REFINE': refine_time,
       'IDLE': self.molecule_timings[mol].get('total_idle_time', 0.0) + current_idle,
       'RUN': self.molecule_timings[mol].get('total_run_time', 0.0) + elapsed,
     }
@@ -1246,6 +1269,13 @@ class TimerPlus(PT):
     if push_controls:
       try:
         OV.SetControlValue('TIMER_WFN', wfn_t)
+      except Exception:
+        pass
+    total_wfn_t = self._get_total_wavefunction_time_str(mol, self.molecule_timings.get(mol, {}))
+    OV.SetVar('TIMER_TOTAL_WFN', total_wfn_t)
+    if push_controls:
+      try:
+        OV.SetControlValue('TIMER_TOTAL_WFN', total_wfn_t)
       except Exception:
         pass
 
@@ -1288,7 +1318,7 @@ class TimerPlus(PT):
     if self.current_molecule and self.current_molecule != "No structure loaded" and self.current_start_time is not None:
       elapsed = time.time() - self.current_start_time
       idle = self._get_idle_seconds()
-      current_work = max(0, elapsed - idle - self._session_refine_time)
+      current_work = max(0, elapsed - idle - self._get_session_refine_wall_time())
       current_idle = idle
       current_total = elapsed
     
@@ -1355,7 +1385,7 @@ class TimerPlus(PT):
         }
     
     if not molecules_to_show:
-      return "<tr><td colspan='5' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
+      return "<tr><td colspan='6' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
     
     html_rows = []
     # Sort by current first, then by last updated
@@ -1369,9 +1399,10 @@ class TimerPlus(PT):
     sorted_molecules = sorted_molecules[:5]
     
     for mol_name, data in sorted_molecules:
-      work_str = self._format_time(data['work'])
+      total_work_str = self._format_time(data['work'] + data['refine'])
       refine_str = self._format_time(data['refine'])
       wfn_str = self._get_wavefunction_time_str(mol_name, data)
+      total_wfn_str = self._get_total_wavefunction_time_str(mol_name, data)
       
       # Highlight current molecule
       manually_edited = data.get('manually_edited_times', False)
@@ -1381,11 +1412,12 @@ class TimerPlus(PT):
       name_link = self._molecule_name_link(mol_name)
       html_rows.append(
         "<tr%s style='background-color: %s;'>" % (row_class, bg_color) +
-        "<td width='34%%' style='padding:6px;'>%s</td>" % name_link +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
+        "<td width='25%%' style='padding:6px;'>%s</td>" % name_link +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % total_work_str +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
         "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
-        "<td width='30%%' style='padding:6px; text-align:center;'>%s</td>" % self._short_date(data['updated']) +
+        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % total_wfn_str +
+        "<td width='27%%' style='padding:6px; text-align:center;'>%s</td>" % self._short_date(data['updated']) +
         "</tr>"
       )
     
@@ -1519,7 +1551,7 @@ class TimerPlus(PT):
     if self.current_molecule and self.current_molecule != "No structure loaded" and self.current_start_time is not None:
       elapsed = time.time() - self.current_start_time
       idle = self._get_idle_seconds()
-      current_work = max(0, elapsed - idle - self._session_refine_time)
+      current_work = max(0, elapsed - idle - self._get_session_refine_wall_time())
       current_idle = idle
       current_total = elapsed
     
@@ -1588,7 +1620,7 @@ class TimerPlus(PT):
         }
     
     if not molecules_to_show:
-      return "<tr><td colspan='8' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
+      return "<tr><td colspan='10' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
     
     html_rows = []
     # Sort by current first, then by last updated
@@ -1602,9 +1634,11 @@ class TimerPlus(PT):
     
     for mol_name, data in sorted_molecules:
       work_str = self._format_time(data['work'])
+      total_work_str = self._format_time(data['work'] + data['refine'])
       refine_str = self._format_time(data['refine'])
       idle_str = self._format_time(data['idle'])
       wfn_str = self._get_wavefunction_time_str(mol_name, data)
+      total_wfn_str = self._get_total_wavefunction_time_str(mol_name, data)
       
       # Highlight current molecule
       manually_edited = data.get('manually_edited_times', False)
@@ -1616,14 +1650,16 @@ class TimerPlus(PT):
       comment = html_lib.escape(str(data.get('comment') or ''))
       html_rows.append(
         "<tr%s style='background-color: %s;'>" % (row_class, bg_color) +
-        "<td width='16%%' style='padding:6px;'>%s</td>" % name_link +
-        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
-        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
-        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
-        "<td width='20%%' style='padding:6px;'>%s</td>" % comment +
-        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
+        "<td width='14%%' style='padding:6px;'>%s</td>" % name_link +
+        "<td width='7%%' style='padding:6px; text-align:center;'>%s</td>" % total_work_str +
+        "<td width='7%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
+        "<td width='7%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
+        "<td width='7%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
+        "<td width='7%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
+        "<td width='7%%' style='padding:6px; text-align:center;'>%s</td>" % total_wfn_str +
+        "<td width='9%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
+        "<td width='24%%' style='padding:6px;'>%s</td>" % comment +
+        "<td width='11%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
         "</tr>"
       )
     
@@ -1908,7 +1944,7 @@ class TimerPlus(PT):
     return "%02d:%02d:%02d" % (hours, minutes, secs)
 
   def _parse_orca_total_runtime_seconds(self, log_path):
-    """Extract TOTAL RUN TIME from an ORCA .wfnlog file and return seconds."""
+    """Extract TOTAL RUN TIME from an ORCA log file and return seconds."""
     try:
       if not log_path or not os.path.exists(log_path):
         return None
@@ -1937,8 +1973,8 @@ class TimerPlus(PT):
     except Exception:
       return None
 
-  def _find_wfnlog_for_molecule(self, mol_name, data=None):
-    """Resolve best .wfnlog path for a molecule entry."""
+  def _find_orca_log_for_molecule(self, mol_name, data=None):
+    """Resolve best _orca.log path for a molecule entry."""
     try:
       rec = dict(self.molecule_timings.get(mol_name, {}) or {})
       if data:
@@ -1968,14 +2004,14 @@ class TimerPlus(PT):
           for stem in (base_name, mol_name):
             if not stem:
               continue
-            p = os.path.join(dpath, '%s.wfnlog' % stem)
+            p = os.path.join(dpath, '%s_orca.log' % stem)
             checked.append(p)
             if os.path.exists(p):
               return p
         except Exception:
           continue
 
-      # Last fallback: pick newest .wfnlog in candidate dirs
+      # Last fallback: pick newest _orca.log in candidate dirs
       newest = None
       newest_mtime = -1.0
       for dpath in candidate_dirs:
@@ -1983,7 +2019,7 @@ class TimerPlus(PT):
           if not dpath or not os.path.exists(dpath):
             continue
           for fn in os.listdir(dpath):
-            if not fn.lower().endswith('.wfnlog'):
+            if not fn.lower().endswith('_orca.log'):
               continue
             p = os.path.join(dpath, fn)
             mt = os.path.getmtime(p)
@@ -1996,14 +2032,73 @@ class TimerPlus(PT):
     except Exception:
       return None
 
-  def _get_wavefunction_time_str(self, mol_name, data=None):
-    """Return formatted wave-function runtime for molecule from its own .wfnlog or N/A."""
+  def _get_wfn_job_dirs(self, mol_name, data=None):
+    """Return existing Wfn_job directories for the molecule."""
     try:
-      p = self._find_wfnlog_for_molecule(mol_name, data)
+      rec = dict(self.molecule_timings.get(mol_name, {}) or {})
+      if data:
+        rec.update(data)
+      base_name = str(rec.get('base_sNum') or mol_name or '').strip()
+      if base_name.endswith(']') and ' [' in base_name:
+        base_name = base_name.rsplit(' [', 1)[0].strip()
+
+      candidates = []
+      sdir = rec.get('sNumPath') or rec.get('filepath')
+      if sdir:
+        if os.path.basename(os.path.normpath(sdir)).lower() == 'wfn_job':
+          candidates.append(sdir)
+        candidates.extend((
+          os.path.join(sdir, 'olex2', 'Wfn_job'),
+          os.path.join(sdir, 'Wfn_job')
+        ))
+      if base_name:
+        candidates.extend((
+          os.path.join(instance_path, 'samples', base_name, 'olex2', 'Wfn_job'),
+          os.path.join(instance_path, 'samples', base_name, 'Wfn_job')
+        ))
+
+      for candidate in candidates:
+        if os.path.isdir(candidate):
+          return [candidate]
+      return []
+    except Exception:
+      return []
+
+  def _get_wavefunction_time_str(self, mol_name, data=None):
+    """Return formatted wave-function runtime for molecule from its own _orca.log or N/A."""
+    try:
+      p = self._find_orca_log_for_molecule(mol_name, data)
       sec = self._parse_orca_total_runtime_seconds(p)
       if sec is None:
         return 'N/A'
       return self._format_time(sec)
+    except Exception:
+      return 'N/A'
+
+  def _get_total_wavefunction_time_str(self, mol_name, data=None):
+    """Sum WFN runtimes from all current and backup jobs in Wfn_job."""
+    try:
+      logs = []
+      seen = set()
+      for directory in self._get_wfn_job_dirs(mol_name, data):
+        for root, dirs, files in os.walk(directory):
+          for filename in files:
+            if not filename.lower().endswith('_orca.log'):
+              continue
+            path = os.path.join(root, filename)
+            normalized = os.path.normcase(os.path.abspath(path))
+            if normalized not in seen:
+              seen.add(normalized)
+              logs.append(path)
+
+      runtimes = [
+        seconds for seconds in (
+          self._parse_orca_total_runtime_seconds(path) for path in logs
+        ) if seconds is not None
+      ]
+      if not runtimes:
+        return 'N/A'
+      return self._format_time(sum(runtimes))
     except Exception:
       return 'N/A'
 
@@ -2371,7 +2466,7 @@ class TimerPlus(PT):
     """Get formatted HTML table of timing history filtered by search term"""
     search_term = self._history_search_term.lower().strip()
     if not search_term:
-      return "<tr><td colspan='8' style='text-align:center; color:#666;'>Enter a structure name above and click Search.</td></tr>"
+      return "<tr><td colspan='10' style='text-align:center; color:#666;'>Enter a structure name above and click Search.</td></tr>"
 
     self.check_and_switch_molecule(do_autosave=False)
     
@@ -2383,7 +2478,7 @@ class TimerPlus(PT):
     if self.current_molecule and self.current_molecule != "No structure loaded" and self.current_start_time is not None:
       elapsed = time.time() - self.current_start_time
       idle = self._get_idle_seconds()
-      current_work = max(0, elapsed - idle - self._session_refine_time)
+      current_work = max(0, elapsed - idle - self._get_session_refine_wall_time())
       current_idle = idle
       current_total = elapsed
     
@@ -2452,7 +2547,7 @@ class TimerPlus(PT):
         }
     
     if not molecules_to_show:
-      return "<tr><td colspan='8' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
+      return "<tr><td colspan='10' style='text-align:center;'>No timing data available.<br/>Load a structure to start tracking.</td></tr>"
     
     html_rows = []
     # Sort by current first, then by last updated
@@ -2471,22 +2566,24 @@ class TimerPlus(PT):
     ]
     html_rows.append(
       "<tr style='background-color: #fff8dc; font-weight: bold;'>" +
-      "<td colspan='8' style='text-align:center; color: #0066cc; padding: 8px;'>" +
+      "<td colspan='10' style='text-align:center; color: #0066cc; padding: 8px;'>" +
       "Found %d of %d structures matching '%s'" % (len(sorted_molecules), total_count, search_term) +
       "</td></tr>"
     )
     if not sorted_molecules:
       html_rows.append(
-        "<tr><td colspan='8' style='text-align:center;'>No structures found matching '%s'</td></tr>" % search_term
+        "<tr><td colspan='10' style='text-align:center;'>No structures found matching '%s'</td></tr>" % search_term
       )
     
     # Show ALL (no 5-item limit for popup)
     
     for mol_name, data in sorted_molecules:
       work_str = self._format_time(data['work'])
+      total_work_str = self._format_time(data['work'] + data['refine'])
       refine_str = self._format_time(data['refine'])
       idle_str = self._format_time(data['idle'])
       wfn_str = self._get_wavefunction_time_str(mol_name, data)
+      total_wfn_str = self._get_total_wavefunction_time_str(mol_name, data)
       
       # Highlight current molecule
       manually_edited = data.get('manually_edited_times', False)
@@ -2498,12 +2595,14 @@ class TimerPlus(PT):
       comment = html_lib.escape(str(data.get('comment') or ''))
       html_rows.append(
         "<tr%s style='background-color: %s;'>" % (row_class, bg_color) +
-        "<td width='16%%' style='padding:6px;'>%s</td>" % name_link +
-        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
-        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
-        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
-        "<td width='12%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
+        "<td width='14%%' style='padding:6px;'>%s</td>" % name_link +
+        "<td width='9%%' style='padding:6px; text-align:center;'>%s</td>" % total_work_str +
+        "<td width='9%%' style='padding:6px; text-align:center;'>%s</td>" % work_str +
+        "<td width='9%%' style='padding:6px; text-align:center;'>%s</td>" % refine_str +
+        "<td width='9%%' style='padding:6px; text-align:center;'>%s</td>" % idle_str +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % wfn_str +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % total_wfn_str +
+        "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % data['updated'] +
         "<td width='20%%' style='padding:6px;'>%s</td>" % comment +
         "<td width='10%%' style='padding:6px; text-align:center;'>%s</td>" % edit_link +
         "</tr>"
@@ -2577,7 +2676,7 @@ class TimerPlus(PT):
         return (
           "<h3 style='color: #c0392b; margin-top: 15px;'>🔍 Search Results</h3>" +
           "<table style='border-collapse: collapse; width: 100%; background-color: #f9f9f9;'>" +
-          "<tr><td colspan='7' style='text-align:center; padding: 15px; color: #c0392b;'>" +
+          "<tr><td colspan='9' style='text-align:center; padding: 15px; color: #c0392b;'>" +
           "No structures found matching '<b>%s</b>'</td></tr></table>" % search_term
         )
       
@@ -2590,9 +2689,11 @@ class TimerPlus(PT):
         "<tr style='background-color: #34495e;'>" +
         "<th style='color: white; padding: 8px; text-align: left;'>Molecule Name</th>" +
         "<th style='color: white; padding: 8px; text-align: center;'>Work Time</th>" +
+        "<th style='color: white; padding: 8px; text-align: center;'>Model Time</th>" +
         "<th style='color: white; padding: 8px; text-align: center;'>Refine Time</th>" +
         "<th style='color: white; padding: 8px; text-align: center;'>Idle Time</th>" +
-        "<th style='color: white; padding: 8px; text-align: center;'>Wave Function</th>" +
+        "<th style='color: white; padding: 8px; text-align: center;'>WFN</th>" +
+        "<th style='color: white; padding: 8px; text-align: center;'>Total WFN</th>" +
         "<th style='color: white; padding: 8px; text-align: center;'>Last Updated</th>" +
         "<th style='color: white; padding: 8px; text-align: center;'>Edit</th></tr>"
       )
@@ -2600,9 +2701,11 @@ class TimerPlus(PT):
       # Add filtered rows
       for mol_name, data in filtered:
         work_str = self._format_time(data['work'])
+        total_work_str = self._format_time(data['work'] + data['refine'])
         refine_str = self._format_time(data['refine'])
         idle_str = self._format_time(data['idle'])
         wfn_str = self._get_wavefunction_time_str(mol_name, data)
+        total_wfn_str = self._get_total_wavefunction_time_str(mol_name, data)
         
         # Highlight current molecule
         manually_edited = data.get('manually_edited_times', False)
@@ -2613,13 +2716,15 @@ class TimerPlus(PT):
         name_link = self._molecule_name_link(mol_name, close_search=True)
         html += (
           "<tr%s style='background-color: %s; border: 1px solid #bdc3c7;'>" % (row_class, bg_color) +
-          "<td style='padding: 8px; width: 18%%;'>%s</td>" % name_link +
-          "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % work_str +
-          "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % refine_str +
-          "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % idle_str +
-          "<td style='padding: 8px; text-align: center; width: 14%%;'>%s</td>" % wfn_str +
-          "<td style='padding: 8px; text-align: center; width: 10%%;'>%s</td>" % data['updated'] +
-          "<td style='padding: 8px; text-align: center; width: 22%%;'>%s</td></tr>" % edit_link
+          "<td style='padding: 8px; width: 15%%;'>%s</td>" % name_link +
+          "<td style='padding: 8px; text-align: center; width: 9%%;'>%s</td>" % total_work_str +
+          "<td style='padding: 8px; text-align: center; width: 9%%;'>%s</td>" % work_str +
+          "<td style='padding: 8px; text-align: center; width: 9%%;'>%s</td>" % refine_str +
+          "<td style='padding: 8px; text-align: center; width: 9%%;'>%s</td>" % idle_str +
+          "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % wfn_str +
+          "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % total_wfn_str +
+          "<td style='padding: 8px; text-align: center; width: 12%%;'>%s</td>" % data['updated'] +
+          "<td style='padding: 8px; text-align: center; width: 13%%;'>%s</td></tr>" % edit_link
         )
       
       html += "</table><br>"

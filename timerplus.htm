@@ -36,43 +36,43 @@
   </td>
 <!-- #include row_table_off gui/blocks/row_table_off.htm;1; -->
 
-<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=TimerPlus; help_ext=TimerPlus-Timing;helpTxt=These are cumulative times for the active structure. Work excludes detected idle and refinement time. Refine records refinement time, Idle is detected inactivity, Run is total recorded time, and WaveFn is time attributed to the wavefunction calculation. Display precision is set in TimerPlus Extras.;1; -->
+<!-- #include tool-row-help gui/blocks/tool-row-help.htm;name=TimerPlus; help_ext=TimerPlus-Timing;helpTxt=These are cumulative times for the active structure. Work is Model plus Refine. Total WFN sums runtimes from the Wfn_job folder and its backup folders. Display precision is set in TimerPlus Extras.;1; -->
 
-  <td ALIGN='left' width='20%' style='padding:2px 4px;'>
+  <td ALIGN='left' width='17%' style='padding:2px 4px;'>
     <b>Molecule:</b>
     <snippet src="gui/snippets/input-label"
       name="TIMER_MOL"
       value="GetVar(TIMER_MOL)"/>
   </td>
-  <td ALIGN='left' width='16%' style='padding:2px 4px;'>
-    <b>Work:</b>
+  <td ALIGN='left' width='16.6%' style='padding:2px 4px;'>
+    <b>Model:</b>
     <snippet src="gui/snippets/input-label"
       name="TIMER_WORK"
       value="GetVar(TIMER_WORK)"/>
   </td>
-  <td ALIGN='left' width='16%' style='padding:2px 4px;'>
+  <td ALIGN='left' width='16.6%' style='padding:2px 4px;'>
+    <b>Work:</b>
+    <snippet src="gui/snippets/input-label"
+      name="TIMER_TOTAL_WORK"
+      value="GetVar(TIMER_TOTAL_WORK)"/>
+  </td>
+  <td ALIGN='left' width='16.6%' style='padding:2px 4px;'>
     <b>Refine:</b>
     <snippet src="gui/snippets/input-label"
       name="TIMER_REFINE"
       value="GetVar(TIMER_REFINE)"/>
   </td>
-  <td ALIGN='left' width='16%' style='padding:2px 4px;'>
-    <b>Idle:</b>
-    <snippet src="gui/snippets/input-label"
-      name="TIMER_IDLE"
-      value="GetVar(TIMER_IDLE)"/>
-  </td>
-  <td ALIGN='left' width='16%' style='padding:2px 4px;'>
-    <b>Run:</b>
-    <snippet src="gui/snippets/input-label"
-      name="TIMER_RUN"
-      value="GetVar(TIMER_RUN)"/>
-  </td>
-  <td ALIGN='left' width='16%' style='padding:2px 4px;'>
-    <b>WaveFn:</b>
+  <td ALIGN='left' width='16.6%' style='padding:2px 4px;'>
+    <b>WFN:</b>
     <snippet src="gui/snippets/input-label"
       name="TIMER_WFN"
       value="GetVar(TIMER_WFN)"/>
+  </td>
+  <td ALIGN='left' width='16.6%' style='padding:2px 4px;'>
+    <b>Total WFN:</b>
+    <snippet src="gui/snippets/input-label"
+      name="TIMER_TOTAL_WFN"
+      value="GetVar(TIMER_TOTAL_WFN)"/>
   </td>
 
 <!-- #include row_table_off gui/blocks/row_table_off.htm;1; -->
