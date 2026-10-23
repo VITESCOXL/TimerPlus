@@ -2,6 +2,7 @@ from olexFunctions import OlexFunctions
 OV = OlexFunctions()
 
 import os
+import sys
 import olex
 import olx
 import olex_gui
@@ -74,6 +75,8 @@ class TimerPlus(PT):
     self._refresh_active = False
     self._idle_seconds = 0.0
     self._idle_last_update = time.time()
+    self._last_activity_time = time.time()
+    self._idle_grace = float(OV.GetParam('TimerPlus.idle_grace', 60.0) or 60.0)
     self._last_mouse_pos = None
     self._mouse_sample_initialized = False
     self._activity_tracking_active = False
@@ -392,12 +395,11 @@ class TimerPlus(PT):
     try:
       self.check_and_switch_molecule()
       self.update_timer_vars(push_controls=True)
-      try:
-        olx.html.Update()
-      except:
-        pass
+      # Redraw once Olex2 has written its own '... is loaded' message, so
+      # that the work time shows in the notification bar straight away.
+      olx.Schedule(2, "spy.TimerPlus.refresh_display()")
     except Exception as e:
-      pass
+      print("TimerPlus: could not handle the opened structure: %s" % e)
 
   def _register_refine_timing(self):
     """Wrap RunRefinementPrg.run so refinement time is captured synchronously.
@@ -577,6 +579,7 @@ class TimerPlus(PT):
     now = time.time()
     self._idle_seconds = 0.0
     self._idle_last_update = now
+    self._last_activity_time = now
     self._last_mouse_pos = None
     self._mouse_sample_initialized = False
     self._sample_pointer_activity()
@@ -587,25 +590,15 @@ class TimerPlus(PT):
         pass
 
   def _sample_pointer_activity(self):
-    """Classify each sampled interval as work when the mouse moved, else idle."""
+    """Classify each sampled interval as work, or as idle once the mouse has
+    not moved for `idle_grace` seconds (reading, typing in the console)."""
     try:
-      x = int(olx.GetMouseX())
-      y = int(olx.GetMouseY())
-
-      # Count activity while the pointer is anywhere inside the Olex2 window
-      # (GUI panel, console, molecule) -- not only over the molecule, which
-      # left almost all real work counted as idle.
-      ws = [int(v) for v in olx.GetWindowSize('main').split(',')]
-      if len(ws) >= 4:
-        x0, y0, w, h = ws[0], ws[1], ws[2], ws[3]
-        inside_local = (0 <= x < w) and (0 <= y < h)
-        inside_absolute = (x0 <= x < (x0 + w)) and (y0 <= y < (y0 + h))
-        if not (inside_local or inside_absolute):
-          pos = None
-        else:
-          pos = (x, y)
+      # Movement over another program (e.g. one on top of a maximised
+      # Olex2) is not work on this structure.
+      if self._olex2_is_foreground():
+        pos = self._pointer_pos_in_main_window()
       else:
-        pos = (x, y)
+        pos = None
 
       now = time.time()
       if not self._mouse_sample_initialized:
@@ -616,12 +609,55 @@ class TimerPlus(PT):
 
       dt = max(0.0, now - self._idle_last_update)
       moved = pos is not None and self._last_mouse_pos is not None and pos != self._last_mouse_pos
-      if not getattr(self, '_refine_active', False) and not moved:
+      if moved:
+        self._last_activity_time = now
+      # Do not count idle while refinement is running. A run that started
+      # but never reported its end (e.g. a solution that stopped early) must
+      # not switch idle counting off for good: such a flag is stale after 30 min.
+      refining = getattr(self, '_refine_active', False)
+      if refining and now - (getattr(self, '_refine_start_time', None) or now) > 1800:
+        self._refine_active = refining = False
+      if not refining and now - self._last_activity_time >= self._idle_grace:
         self._idle_seconds += dt
       self._idle_last_update = now
       self._last_mouse_pos = pos
     except Exception as e:
       print("TimerPlus: could not sample mouse position: %s" % e)
+
+  def _pointer_pos_in_main_window(self):
+    """(x, y) of the pointer if it is inside the Olex2 main window, else None."""
+    x = int(olx.GetMouseX())
+    y = int(olx.GetMouseY())
+
+    # Count activity while the pointer is anywhere inside the Olex2 window
+    # (GUI panel, console, molecule) -- not only over the molecule, which
+    # left almost all real work counted as idle.
+    ws = [int(v) for v in olx.GetWindowSize('main').split(',')]
+    if len(ws) >= 4:
+      x0, y0, w, h = ws[0], ws[1], ws[2], ws[3]
+      inside_local = (0 <= x < w) and (0 <= y < h)
+      inside_absolute = (x0 <= x < (x0 + w)) and (y0 <= y < (y0 + h))
+      if not (inside_local or inside_absolute):
+        return None
+    return (x, y)
+
+  def _olex2_is_foreground(self):
+    """True if the active (foreground) window belongs to Olex2 -- main
+    window or one of its popups. Windows only; elsewhere always True."""
+    if sys.platform != 'win32':
+      return True
+    try:
+      import ctypes
+      from ctypes import wintypes
+      user32 = ctypes.windll.user32
+      pid = wintypes.DWORD()
+      user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
+      return pid.value == os.getpid()
+    except Exception as e:
+      if not getattr(self, '_foreground_error_reported', False):
+        self._foreground_error_reported = True
+        print("TimerPlus: cannot tell whether Olex2 is the active window: %s" % e)
+      return True
 
   def _get_idle_seconds(self):
     """Return idle seconds derived from plugin-tracked activity."""
@@ -1697,7 +1733,7 @@ class TimerPlus(PT):
     """Open a popup window showing the full timing history."""
     try:
       # Popup a simple HTML page bundled with the plugin that displays the history
-      wFilePath = os.path.join(self.p_path, 'TimerPlus_history.htm')
+      wFilePath = os.path.join(self.p_path, 'timerplus_history.htm')
       width, height, left, right, top = self._get_history_popup_layout()
       # Use a named popup so multiple calls reuse the same window
       try:
@@ -1724,7 +1760,7 @@ class TimerPlus(PT):
       olx.Schedule(1, "spy.TimerPlus._show_search_results_after_history()")
       return
 
-    wFilePath = os.path.join(self.p_path, 'TimerPlus_search_results.htm')
+    wFilePath = os.path.join(self.p_path, 'timerplus_search_results.htm')
     width, height, left, right, top = self._get_history_popup_layout()
     try:
       olx.Popup('TimerPlus_search_results', wFilePath, b="tcr", t="TimerPlus Search Results", w=width, h=height, x=right, y=top)
@@ -1785,7 +1821,7 @@ class TimerPlus(PT):
       olx.Schedule(1, "spy.TimerPlus._show_edit_after_history()")
       return
     try:
-      wFilePath = os.path.join(self.p_path, 'TimerPlus_history_edit.htm')
+      wFilePath = os.path.join(self.p_path, 'timerplus_history_edit.htm')
       width, height, left, top = self._get_edit_popup_layout()
       try:
         olx.Popup('TimerPlus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=width, h=height, x=left, y=top)
@@ -1849,7 +1885,7 @@ class TimerPlus(PT):
       except Exception:
         pass
       width, height, left, top = self._get_edit_popup_layout()
-      wFilePath = os.path.join(self.p_path, 'TimerPlus_history_edit.htm')
+      wFilePath = os.path.join(self.p_path, 'timerplus_history_edit.htm')
       try:
         olx.Popup('TimerPlus_history_edit', wFilePath, b="tcr", t="Edit Timing History", w=width, h=height, x=left, y=top)
       except Exception:
