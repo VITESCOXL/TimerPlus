@@ -65,7 +65,8 @@ class TimerPlus(PT):
     self.current_start_time = None
     self.current_idle_start = None
     self._last_auto_save = time.time()
-    self._save_interval = 10  # Auto-save every 10 seconds
+    self._save_interval = 60  # Auto-save at most once a minute, not while idle
+    self._activity_interval = 10  # Seconds between activity samples; each one writes to the Olex2 log
     self._session_refine_time = 0.0  # refine time accumulated since last save
     self._orig_refine_run = None
     self._registered_refine_listeners = False
@@ -434,8 +435,9 @@ class TimerPlus(PT):
         elapsed = 0.0
       self._session_refine_time += elapsed
       self._refine_active = False
-      # Advance the idle clock baseline so the refine period is not counted as idle
-      self._idle_last_update = time.time()
+      # Advance the idle clock baseline so the refine period is not counted as
+      # idle, and give the user the full grace period to look at the result
+      self._idle_last_update = self._last_activity_time = time.time()
       olx.Schedule(3, "spy.TimerPlus.refresh_display()")  # Update display immediately after refine ends
       # After a refine ends, attempt to parse NoSpher output.
       # Schedule a retry 4 s later so the file has time to be fully written.
@@ -500,7 +502,7 @@ class TimerPlus(PT):
     #   olx.Schedule(self._refresh_interval, "spy.TimerPlus._tick()")
 
   def _start_activity_tracking(self):
-    """Start one-second pointer sampling without refreshing the timer GUI."""
+    """Start periodic activity sampling without refreshing the timer GUI."""
     self._activity_tracking_active = True
     self._sample_pointer_activity()
     self._schedule_activity_sample()
@@ -509,13 +511,13 @@ class TimerPlus(PT):
     if not self._activity_tracking_active:
       return
     try:
-      olx.Schedule(1, "spy.TimerPlus._track_mouse_activity()")
+      olx.Schedule(self._activity_interval, "spy.TimerPlus._track_mouse_activity()")
     except Exception as e:
       self._activity_tracking_active = False
       print("TimerPlus: could not schedule mouse activity tracking: %s" % e)
 
   def _track_mouse_activity(self):
-    """Sample mouse movement and maintain timing, without updating the GUI."""
+    """Sample user activity and maintain timing, without updating the GUI."""
     if not self._activity_tracking_active:
       return
     try:
@@ -590,39 +592,75 @@ class TimerPlus(PT):
         pass
 
   def _sample_pointer_activity(self):
-    """Classify each sampled interval as work, or as idle once the mouse has
-    not moved for `idle_grace` seconds (reading, typing in the console)."""
+    """Add to the idle time whatever part of the time since the last sample
+    came more than `idle_grace` seconds after the last user activity."""
     try:
-      # Movement over another program (e.g. one on top of a maximised
-      # Olex2) is not work on this structure.
-      if self._olex2_is_foreground():
-        pos = self._pointer_pos_in_main_window()
-      else:
-        pos = None
-
       now = time.time()
+      activity = self._latest_activity(now)
       if not self._mouse_sample_initialized:
-        self._last_mouse_pos = pos
         self._mouse_sample_initialized = True
         self._idle_last_update = now
         return
 
-      dt = max(0.0, now - self._idle_last_update)
-      moved = pos is not None and self._last_mouse_pos is not None and pos != self._last_mouse_pos
-      if moved:
-        self._last_activity_time = now
+      idle_start = max(self._idle_last_update, self._last_activity_time + self._idle_grace)
+      idle_end = now
+      if activity is not None and activity > self._last_activity_time:
+        self._last_activity_time = idle_end = activity
       # Do not count idle while refinement is running. A run that started
       # but never reported its end (e.g. a solution that stopped early) must
       # not switch idle counting off for good: such a flag is stale after 30 min.
       refining = getattr(self, '_refine_active', False)
       if refining and now - (getattr(self, '_refine_start_time', None) or now) > 1800:
         self._refine_active = refining = False
-      if not refining and now - self._last_activity_time >= self._idle_grace:
-        self._idle_seconds += dt
+      if not refining:
+        self._idle_seconds += max(0.0, idle_end - idle_start)
       self._idle_last_update = now
-      self._last_mouse_pos = pos
     except Exception as e:
-      print("TimerPlus: could not sample mouse position: %s" % e)
+      print("TimerPlus: could not sample user activity: %s" % e)
+
+  def _latest_activity(self, now):
+    """Time of the latest user input, or None if there is nothing to go by.
+    Input in another program (e.g. one on top of a maximised Olex2) is not
+    work on this structure."""
+    if not self._olex2_is_foreground():
+      self._last_mouse_pos = None
+      return None
+    input_time = self._last_input_time()
+    if input_time is not None:
+      return min(input_time, now)
+    pos = self._pointer_pos_in_main_window()
+    moved = pos is not None and self._last_mouse_pos is not None and pos != self._last_mouse_pos
+    self._last_mouse_pos = pos
+    return now if moved else None
+
+  def _last_input_time(self):
+    """time.time() of the last keyboard or mouse input to any program, so
+    that nothing between two samples is missed. Windows only, else None."""
+    if sys.platform != 'win32':
+      return None
+    try:
+      import ctypes
+      from ctypes import wintypes
+      class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [('cbSize', wintypes.UINT), ('dwTime', wintypes.DWORD)]
+      info = LASTINPUTINFO()
+      info.cbSize = ctypes.sizeof(info)
+      if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        raise ctypes.WinError()
+      # both count milliseconds in 32 bits, and wrap around after 49.7 days
+      ticks = (ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF
+      return time.time() - ticks / 1000.0
+    except Exception as e:
+      if not getattr(self, '_last_input_error_reported', False):
+        self._last_input_error_reported = True
+        print("TimerPlus: cannot read the last input time, using mouse movement: %s" % e)
+      return None
+
+  def _autosave_due(self):
+    """False while idle: nothing but idle time is accumulating, which is
+    saved with the next real save, so an unattended Olex2 writes no files."""
+    return (getattr(self, '_refine_active', False)
+      or time.time() - self._last_activity_time < self._idle_grace)
 
   def _pointer_pos_in_main_window(self):
     """(x, y) of the pointer if it is inside the Olex2 main window, else None."""
@@ -798,9 +836,10 @@ class TimerPlus(PT):
     else:
       mol_name = base_mol
     
-    # Periodic auto-save (every 10 seconds)
+    # Periodic auto-save
     if do_autosave and time.time() - self._last_auto_save > self._save_interval:
-      if self.current_molecule and self.current_molecule != "No structure loaded":
+      if (self.current_molecule and self.current_molecule != "No structure loaded"
+          and self._autosave_due()):
         self.save_current_molecule_timing(reset_idle=True)
       self._last_auto_save = time.time()
     
@@ -905,12 +944,6 @@ class TimerPlus(PT):
               user_info = {}
             user_info['source'] = 'db' if user_info.get('displayname') else 'none'
             self.molecule_timings[self.current_molecule].setdefault('user', user_info)
-            try:
-              logp = os.path.join(instance_path, 'TimerPlus_debug.log')
-              with open(logp, 'a') as lf:
-                lf.write("%s\t%s\t%s\n" % (time.strftime('%Y-%m-%d %H:%M:%S'), self.current_molecule, json.dumps(user_info)))
-            except Exception:
-              pass
           except Exception:
             pass
         except Exception:
@@ -919,8 +952,10 @@ class TimerPlus(PT):
       
       # Reset timers to avoid double-counting
       self.current_start_time = time.time()
+      # Only the counter: saving is not user activity, so the time of the last
+      # activity stays. Restarting it here kept idle_grace from ever running out.
       if reset_idle:
-        self._reset_idle_tracking(reset_gui=True)
+        self._idle_seconds = 0.0
       self._session_refine_time = 0.0
       self._nospher_wall_clock = 0.0
   

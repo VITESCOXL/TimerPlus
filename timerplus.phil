@@ -10,7 +10,7 @@ TimerPlus{
     }
   idle_grace = 60
     .type = float
-    .help = Seconds without mouse movement in the Olex2 window before time counts as idle.
+    .help = Seconds without keyboard or mouse input while Olex2 is the active window before time counts as idle.
   notify_work_time = True
     .type = bool
     .help = Show the current structure's total work time in the notification bar at the top of the screen.
